@@ -1,0 +1,30 @@
+{
+    "0": {
+        "Version": 0,
+        "SubjectSigKey": "FURJ4+4cRNN/vsHFgDUX8u+wbHcZAle9SVnTdamfx7g=",
+        "Signature": "aJvcfRseRAh/y8bBeLFRTqaUdFweivVun7ZMpyUVvQKMeR1a7CCmCS8obcHz0f877VlED0AReI2fytfIDmihBw==",
+        "Comment": "",
+        "Subject": "1-12",
+        "ExpirationTime": 1518710450,
+        "EncAlgorithm": "curve25519xsalsa20poly1305",
+        "IssuingTime": 1487174450,
+        "SubjectEncKey": "4yz6GVNKOoIHmjrbV+5aBZp0Fa2+/NWhRwD9LuLFNzc=",
+        "CanIssue": false,
+        "Issuer": "1-11",
+        "SignAlgorithm": "ed25519"
+    },
+    "1": {
+        "Version": 0,
+        "SubjectSigKey": "FGxtL+CxT6CTzHvH970UflBWEttOu7GoReaVbl4BJ+4=",
+        "Signature": "9Bb7bIeCajHtpxbchE+JYeAFR2+OU8afyyqIwwIR6q3iJxqbYILzU47yoawEWwdwqE5I+EVE7OgThb3hTdLWAw==",
+        "Comment": "",
+        "Subject": "1-11",
+        "ExpirationTime": 1518710450,
+        "EncAlgorithm": "curve25519xsalsa20poly1305",
+        "IssuingTime": 1487174450,
+        "SubjectEncKey": "i9ZG3+bIirqB2H8TJRek2fcsaAdZ+crnccRaBAj1q3g=",
+        "CanIssue": false,
+        "Issuer": "1-11",
+        "SignAlgorithm": "ed25519"
+    }
+}
