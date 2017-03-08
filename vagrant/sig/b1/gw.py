@@ -74,7 +74,7 @@ class ScionSIG(SCIONElement):
 
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        self._udp_sock = lib.socket.ReliableSocket(reg=(sig_addr, self.sig_port, None, None))
+        self._udp_sock = lib.socket.ReliableSocket(reg=(sig_addr, 0, None, None))
         self._socks.add(self._udp_sock, self.handle_accept) # SOBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
