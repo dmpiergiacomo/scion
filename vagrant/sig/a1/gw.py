@@ -130,8 +130,6 @@ class IP_Receiver(threading.Thread):
                 else:
                     sn = 0
 
-            else:
-                print('Unable to get path directly from sciond')
         print('***** IP receiver exited *****')
         sys.exit(1)
 
@@ -223,7 +221,6 @@ class SCION_Sender(threading.Thread):
     def _get_path(self, api):
         if api:
             self._get_path_via_api()
-            print('SCION path successfully received')
         else:
             self._get_path_direct()
 
@@ -296,13 +293,9 @@ class SCION_Sender(threading.Thread):
     def _run(self):
         print('SCION Sender Started')
         while (self.run_event.is_set()):
-            #if self.buf.tell() >= SCION_PCK_LEN:
             if len(self.buf) >= SCION_PCK_LEN:
                 self._send_pck(self._build_pck(), self.first_hop)
-                time.sleep(.1)
-        # stop SCIOND
         print('***** SCION sender exited *****')
-        self.sd.stop()
         sys.exit(1)
 
     def _send_pck(self, spkt, next_=None):
@@ -344,6 +337,48 @@ class SCION_Sender(threading.Thread):
         return PayloadRaw(pck)
 
 
+class SCION_Receiver(threading.Thread):
+    '''
+    Class that encapsulate IP packets into SCION ones and send the SCION packet to the right remote SIG
+    '''
+    def __init__(self, name, buf, sock, run_event):
+        threading.Thread.__init__(self)
+        self.name = name
+        self.buf = buf
+        self.sock = sock
+        self.run_event = run_event
+
+
+    def run(self):
+        try:
+            self._run()
+        finally:
+            logging.info("Scion Receiver NOT started !!!")
+
+
+    def _run(self):
+        print('SCION Receiver Started')
+        while (self.run_event.is_set()):
+            spck = self._recv()
+            print('SCION BUFFER BEFORE: ', len(self.buf))
+            if spck is not None:
+                for i in spck:
+                    self.buf.append(i)
+            print('SCION BUFFER AFTER: ', len(self.buf))
+        print('***** SCION receiver exited *****')
+        sys.exit(1)
+
+
+    def _recv(self):
+        try:
+            packet = self.sock.recv()[0]
+            print('INSIDE TRY BLOCK')
+        except socket.timeout:
+            return None
+        return SCIONL4Packet(packet)
+
+
+
 class ScionSIG(SCIONElement):
     """
     Class that implements a SCION-IP Gateway
@@ -377,13 +412,17 @@ class ScionSIG(SCIONElement):
 
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        _udp_sock = self._create_socket(sig_addr, self.sig_port)
-        self._socks.add(_udp_sock, self.handle_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
+        udp_sock = self._create_socket(sig_addr, self.sig_port)
+        self._socks.add(udp_sock, self.handle_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
-        # create byte stream
+        # create IP byte stream
         # IN THE FUTURE THERE MUST BE A STREAM FOR EACH REMOTE AS
-        buf = deque()
+        ipbuf = deque()
+
+
+        # create SCION stream
+        sbuf = deque()
 
 
         # killing event for all the threads
@@ -392,7 +431,7 @@ class ScionSIG(SCIONElement):
 
 
         # create an Ip_Receiver that processes all the incoming IP packets
-        ip_receiver = IP_Receiver("IP_Receiver-Thread", buf, run_event)
+        ip_receiver = IP_Receiver("IP_Receiver-Thread", ipbuf, run_event)
         ip_receiver.start()
 
 
@@ -402,21 +441,29 @@ class ScionSIG(SCIONElement):
         dest_port = 30150
         dest_sig_addr = SCIONAddr().from_values(dest_ia, dest_host)
 
+
         # create a SCION_Sender that processes all the IP's buffers, decides which one to has the priority
         # and forwards the SCION packets to respective the remote SIG
-        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, buf, sig_addr, dest_sig_addr, dest_port, _udp_sock, run_event, api=True)
+        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, ipbuf, sig_addr, dest_sig_addr, dest_port, udp_sock, run_event, api=True)
         scion_sender.start()
+
+
+        # create a SCION_Receiver that processes all the incoming SCION packets
+        scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, udp_sock, run_event)
+        scion_receiver.start()
 
 
         # kill all threads if needed
         try:
             while 1:
                 time.sleep(.1)
-                sd.stop()
         except KeyboardInterrupt:
             print ('Attempting to close threads')
             run_event.clear()
             time.sleep(1)
+            # stop SCIOND
+            sd.stop()
+            udp_sock.close()
             print ('All threads successfully closed')
 
 
