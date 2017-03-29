@@ -1,0 +1,37 @@
+BeaconServers:
+  bs1-12-1:
+    Addr: 127.0.0.18
+    Port: 30094
+BorderRouters:
+  br1-12-1:
+    Addr: 127.0.0.17
+    Interface:
+      Addr: 169.254.0.2
+      Bandwidth: 1000
+      IFID: 93
+      ISD_AS: 1-11
+      LinkType: PARENT
+      MTU: 1280
+      ToAddr: 169.254.0.1
+      ToUdpPort: 50000
+      UdpPort: 50000
+    Port: 30100
+CertificateServers:
+  cs1-12-1:
+    Addr: 127.0.0.19
+    Port: 30085
+Core: false
+ISD_AS: 1-12
+MTU: 1472
+PathServers:
+  ps1-12-1:
+    Addr: 127.0.0.20
+    Port: 30056
+SibraServers:
+  sb1-12-1:
+    Addr: 127.0.0.21
+    Port: 30073
+Zookeepers:
+  1:
+    Addr: 127.0.0.1
+    Port: 2181

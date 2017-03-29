@@ -1,0 +1,27 @@
+{
+    "CoreCAs": {
+        "1-11": {
+            "OfflineKey": "GRTFbS/f1xFz1edYi1vx5X1+ZhvTWSrGdMhRESguPM8=",
+            "OfflineKeyAlg": "Ed25519",
+            "OnlineKey": "FTIxod8TVC73DnfijdmG388WxIqWTCrI/GWHqxsS7Xc=",
+            "OnlineKeyAlg": "Ed25519"
+        }
+    },
+    "CreationTime": 1487174450,
+    "Description": "ISD 1",
+    "GracePeriod": 18000,
+    "ISDID": 1,
+    "PKILogs": {},
+    "Quarantine": true,
+    "QuorumCAs": 3,
+    "QuorumEEPKI": 2,
+    "QuorumOwnTRC": 2,
+    "RootCAs": {
+        "ca.com": "ca.com_cert_base64"
+    },
+    "RootRainsKey": "dns_srv_addr",
+    "Signatures": {
+        "1-11": "QW1EWjN0SDUvTStUdU8xSWxNUFZPTm9iN0FPZlFjNWtIV243dnFzNkRXTDJNTmdNaEFUK2syeDEyanpmMG9wOHE0cXNyQmowNnluU25IaDdHYlJrQXc9PQ=="
+    },
+    "Version": 0
+}
