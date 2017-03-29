@@ -321,8 +321,7 @@ class SCION_Sender(threading.Thread):
 
 
     def _create_l4_hdr(self):
-        return SCIONUDPHeader.from_values(
-            self.addr, self.sock.port, self.dst, self.dport)
+        return SCIONUDPHeader.from_values(self.addr, self.sock.port, self.dst, self.dport)
 
 
     def _create_extensions(self):
@@ -337,7 +336,7 @@ class SCION_Sender(threading.Thread):
         return PayloadRaw(pck)
 
 
-class SCION_Receiver(threading.Thread):
+class SCION_Receiver(threading.Thread, SCIONElement):
     '''
     Class that encapsulate IP packets into SCION ones and send the SCION packet to the right remote SIG
     '''
@@ -347,6 +346,7 @@ class SCION_Receiver(threading.Thread):
         self.buf = buf
         self.sock = sock
         self.run_event = run_event
+        self._socks.add(self.sock, self.handle_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
     def run(self):
@@ -412,8 +412,7 @@ class ScionSIG(SCIONElement):
 
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        udp_sock = self._create_socket(sig_addr, self.sig_port)
-        self._socks.add(udp_sock, self.handle_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
+        scion_sock = self._create_socket(sig_addr, self.sig_port)
 
 
         # create IP byte stream
@@ -444,13 +443,13 @@ class ScionSIG(SCIONElement):
 
         # create a SCION_Sender that processes all the IP's buffers, decides which one to has the priority
         # and forwards the SCION packets to respective the remote SIG
-        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, ipbuf, sig_addr, dest_sig_addr, dest_port, udp_sock, run_event, api=True)
+        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, ipbuf, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
         scion_sender.start()
 
 
         # create a SCION_Receiver that processes all the incoming SCION packets
-        scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, udp_sock, run_event)
-        scion_receiver.start()
+        #scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, scion_sock, run_event)
+        #scion_receiver.start()
 
 
         # kill all threads if needed
@@ -463,7 +462,7 @@ class ScionSIG(SCIONElement):
             time.sleep(1)
             # stop SCIOND
             sd.stop()
-            udp_sock.close()
+            scion_sock.close()
             print ('All threads successfully closed')
 
 

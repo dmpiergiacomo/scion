@@ -337,7 +337,7 @@ class SCION_Sender(threading.Thread):
         return PayloadRaw(pck)
 
 
-class SCION_Receiver(threading.Thread):
+class SCION_Receiver(threading.Thread, SCIONElement):
     '''
     Class that encapsulate IP packets into SCION ones and send the SCION packet to the right remote SIG
     '''
@@ -347,6 +347,7 @@ class SCION_Receiver(threading.Thread):
         self.buf = buf
         self.sock = sock
         self.run_event = run_event
+        self._socks.add(self.sock, self._encap_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
     def run(self):
@@ -358,24 +359,32 @@ class SCION_Receiver(threading.Thread):
 
     def _run(self):
         print('SCION Receiver Started')
+        self.sock.accept()
         while (self.run_event.is_set()):
-            spck = self._recv()
-            print('SCION BUFFER BEFORE: ', len(self.buf))
-            if spck is not None:
-                for i in spck:
-                    self.buf.append(i)
-            print('SCION BUFFER AFTER: ', len(self.buf))
+            time.sleep(0.1)
         print('***** SCION receiver exited *****')
         sys.exit(1)
 
 
-    def _recv(self):
-        try:
-            packet = self.sock.recv()[0]
-            print('INSIDE TRY BLOCK')
-        except socket.timeout:
-            return None
-        return SCIONL4Packet(packet)
+    def _encap_accept(self, sock):
+        s = sock.accept()
+        if not s:
+            logging.error("accept failed")
+            return
+        self._socks.add(s, self._encap_recv)
+
+
+    def _encap_recv(self, sock):
+        packet = sock.recv()[0]
+        if packet is None:
+            return
+        self.packet_put(packet)
+
+
+    def packet_put(self, packet):
+        for i in packet:
+            print('SCION BUFFER LENGTH: ', len(self.buf))
+            self.buf.append(i)
 
 
 
@@ -410,19 +419,18 @@ class ScionSIG(SCIONElement):
         sd, api_addr = self._run_sciond(self.conf_dir, sig_addr)
 
 
-        # set up ReliableSocket to Dispatcher
-        ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        udp_sock = self._create_socket(sig_addr, self.sig_port)
-        self._socks.add(udp_sock, self.handle_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
-
-
         # create IP byte stream
         # IN THE FUTURE THERE MUST BE A STREAM FOR EACH REMOTE AS
         ipbuf = deque()
 
-
         # create SCION stream
-        sbuf = deque()
+        self.sbuf = deque()
+
+        # set up ReliableSocket to Dispatcher
+        ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
+        scion_sock = self._create_socket(sig_addr, self.sig_port)
+        print('scion_sock RECEIVING PORT IS: ', scion_sock.sock)
+        self._socks.add(scion_sock, self._encap_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
         # killing event for all the threads
@@ -444,13 +452,13 @@ class ScionSIG(SCIONElement):
 
         # create a SCION_Sender that processes all the IP's buffers, decides which one to has the priority
         # and forwards the SCION packets to respective the remote SIG
-        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, ipbuf, sig_addr, dest_sig_addr, dest_port, udp_sock, run_event, api=True)
+        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, ipbuf, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
         scion_sender.start()
 
 
         # create a SCION_Receiver that processes all the incoming SCION packets
-        scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, udp_sock, run_event)
-        scion_receiver.start()
+        #scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, scion_sock, run_event)
+        #scion_receiver.start()
 
 
         # kill all threads if needed
@@ -463,7 +471,7 @@ class ScionSIG(SCIONElement):
             time.sleep(1)
             # stop SCIOND
             sd.stop()
-            udp_sock.close()
+            scion_sock.close()
             print ('All threads successfully closed')
 
 
@@ -486,6 +494,27 @@ class ScionSIG(SCIONElement):
         sock = ReliableSocket(reg=(sig_addr, sig_port, None, None))
         return sock
 
+
+    def _encap_accept(self, sock):
+        print('INSIDE ENCAP_ACCEPT')
+        s = sock.accept()
+        if not s:
+            logging.error("accept failed")
+            return
+        self._socks.add(s, self._encap_recv)
+
+
+    def _encap_recv(self, sock):
+        packet = sock.recv()[0]
+        if packet is None:
+            return
+        self._packet_put(packet)
+
+
+    def _packet_put(self, packet):
+        for i in packet:
+            print('SCION BUFFER LENGTH: ', len(self.sbuf))
+            self.sbuf.append(i)
 
 
 def main(argv):
