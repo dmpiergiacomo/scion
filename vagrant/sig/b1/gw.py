@@ -321,8 +321,7 @@ class SCION_Sender(threading.Thread):
 
 
     def _create_l4_hdr(self):
-        return SCIONUDPHeader.from_values(
-            self.addr, self.sock.port, self.dst, self.dport)
+        return SCIONUDPHeader.from_values(self.addr, self.sock.port, self.dst, self.dport)
 
 
     def _create_extensions(self):
@@ -335,56 +334,6 @@ class SCION_Sender(threading.Thread):
         for i in range(1, SCION_PCK_LEN + 1):
             pck.append(self.buf.popleft())
         return PayloadRaw(pck)
-
-
-class SCION_Receiver(threading.Thread, SCIONElement):
-    '''
-    Class that encapsulate IP packets into SCION ones and send the SCION packet to the right remote SIG
-    '''
-    def __init__(self, name, buf, sock, run_event):
-        threading.Thread.__init__(self)
-        self.name = name
-        self.buf = buf
-        self.sock = sock
-        self.run_event = run_event
-        self._socks.add(self.sock, self._encap_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
-
-
-    def run(self):
-        try:
-            self._run()
-        finally:
-            logging.info("Scion Receiver NOT started !!!")
-
-
-    def _run(self):
-        print('SCION Receiver Started')
-        self.sock.accept()
-        while (self.run_event.is_set()):
-            time.sleep(0.1)
-        print('***** SCION receiver exited *****')
-        sys.exit(1)
-
-
-    def _encap_accept(self, sock):
-        s = sock.accept()
-        if not s:
-            logging.error("accept failed")
-            return
-        self._socks.add(s, self._encap_recv)
-
-
-    def _encap_recv(self, sock):
-        packet = sock.recv()[0]
-        if packet is None:
-            return
-        self.packet_put(packet)
-
-
-    def packet_put(self, packet):
-        for i in packet:
-            print('SCION BUFFER LENGTH: ', len(self.buf))
-            self.buf.append(i)
 
 
 
@@ -405,7 +354,7 @@ class ScionSIG(SCIONElement):
         self.sig_as = sig_as
         self._req_id = 0
 
-        super().__init__('sig', self.conf_dir, host_addr=sig_host, port=self.sig_port)
+        super().__init__('sig', self.conf_dir, host_addr=sig_host, port=0)
 
         print ('Starting GW...')
         print ('The legacy IP interface is ', ETH_LEGACY_IP, ' and the SCION interface is ', ETH_SCION)
@@ -429,7 +378,6 @@ class ScionSIG(SCIONElement):
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
         scion_sock = self._create_socket(sig_addr, self.sig_port)
-        print('scion_sock RECEIVING PORT IS: ', scion_sock.sock)
         self._socks.add(scion_sock, self._encap_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
@@ -446,7 +394,7 @@ class ScionSIG(SCIONElement):
         # only destination for now is SIG at 1-12
         dest_ia = ISD_AS().from_values(1, 11)
         dest_host = HostAddrIPv4('169.254.1.2')
-        dest_port = 30150
+        dest_port = 40500
         dest_sig_addr = SCIONAddr().from_values(dest_ia, dest_host)
 
 
@@ -456,22 +404,24 @@ class ScionSIG(SCIONElement):
         scion_sender.start()
 
 
-        # create a SCION_Receiver that processes all the incoming SCION packets
-        #scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, scion_sock, run_event)
-        #scion_receiver.start()
+        # loop for SCION Receiver
+        self._SCION_Receiver(run_event, sd, scion_sock)
 
 
-        # kill all threads if needed
+
+    def _SCION_Receiver(self, event, sd, sock):
         try:
             while 1:
                 time.sleep(.1)
+                print('scion buffer length: ', len(self.sbuf))
+        # kill all threads if needed
         except KeyboardInterrupt:
             print ('Attempting to close threads')
-            run_event.clear()
+            event.clear()
             time.sleep(1)
             # stop SCIOND
             sd.stop()
-            scion_sock.close()
+            sock.close()
             print ('All threads successfully closed')
 
 
@@ -491,7 +441,8 @@ class ScionSIG(SCIONElement):
     def _create_socket(self, sig_addr, sig_port):
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        sock = ReliableSocket(reg=(sig_addr, sig_port, None, None))
+        sock = ReliableSocket(reg=(sig_addr, sig_port, True, None))
+        sock.settimeout(1.0)
         return sock
 
 
@@ -540,8 +491,9 @@ def main(argv):
             sig_as = int(arg)
 
     conf_dir = "%s/ISD%d/AS%d/endhost" % (GEN_PATH, sig_isd, sig_as)
-    sig_ip_interface = haddr_parse_interface(sig_ip)
-    sig_host = HostAddrIPv4(sig_ip_interface)
+    #sig_ip_interface = haddr_parse_interface(sig_ip)
+    #sig_host = HostAddrIPv4(sig_ip_interface)
+    sig_host = haddr_parse_interface(sig_ip)
     sig = ScionSIG(sig_host, sig_port, conf_dir, sig_isd, sig_as)
 
 

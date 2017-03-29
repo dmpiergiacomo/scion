@@ -396,7 +396,7 @@ class ScionSIG(SCIONElement):
         self.sig_as = sig_as
         self._req_id = 0
 
-        super().__init__('sig', self.conf_dir, host_addr=sig_host, port=self.sig_port)
+        super().__init__('sig', self.conf_dir, host_addr=sig_host, port=0)
 
         print ('Starting GW...')
         print ('The legacy IP interface is ', ETH_LEGACY_IP, ' and the SCION interface is ', ETH_SCION)
@@ -437,7 +437,7 @@ class ScionSIG(SCIONElement):
         # only destination for now is SIG at 1-12
         dest_ia = ISD_AS().from_values(1, 12)
         dest_host = HostAddrIPv4('169.254.2.2')
-        dest_port = 30150
+        dest_port = 40500
         dest_sig_addr = SCIONAddr().from_values(dest_ia, dest_host)
 
 
@@ -482,7 +482,7 @@ class ScionSIG(SCIONElement):
     def _create_socket(self, sig_addr, sig_port):
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        sock = ReliableSocket(reg=(sig_addr, sig_port, None, None))
+        sock = ReliableSocket(reg=(sig_addr, sig_port, True, None))
         return sock
 
 
