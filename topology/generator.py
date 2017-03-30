@@ -61,6 +61,7 @@ from lib.defines import (
     PATH_POLICY_FILE,
     SCION_MIN_MTU,
     SCION_ROUTER_PORT,
+    SCIOND_API_SOCKDIR,
     TOPO_FILE,
 )
 from lib.path_store import PathPolicy
@@ -369,20 +370,19 @@ class CertGenerator(object):
         # Add public root online/offline key to TRC
         core = {}
         core[ONLINE_KEY_ALG_STRING] = DEFAULT_KEYGEN_ALG
-        core[ONLINE_KEY_STRING] = \
-            base64.b64encode(self.pub_online_root_keys[topo_id]).decode('utf-8')
+        core[ONLINE_KEY_STRING] = self.pub_online_root_keys[topo_id]
         core[OFFLINE_KEY_ALG_STRING] = DEFAULT_KEYGEN_ALG
-        core[OFFLINE_KEY_STRING] = base64.b64encode(
-            self.priv_online_root_keys[topo_id]).decode('utf-8')
+        core[OFFLINE_KEY_STRING] = self.priv_online_root_keys[topo_id]
         trc.core_ases[str(topo_id)] = core
-
-    def _create_trc(self, isd):
         ca_certs = {}
-        for ca_name, ca_cert in self.ca_certs[isd].items():
+        for ca_name, ca_cert in self.ca_certs[topo_id[0]].items():
             ca_certs[ca_name] = \
                  crypto.dump_certificate(crypto.FILETYPE_ASN1, ca_cert)
+        trc.root_cas = ca_certs
+
+    def _create_trc(self, isd):
         self.trcs[isd] = TRC.from_values(
-            isd, "ISD %s" % isd, 0, {}, ca_certs,
+            isd, "ISD %s" % isd, 0, {}, {},
             {}, 2, 'dns_srv_addr', 2,
             3, 18000, True, {})
 
@@ -698,6 +698,14 @@ class SupervisorGenerator(object):
             entries.append((elem, [cmd, "-id", elem, "-confd", conf_dir]))
         return entries
 
+    def _sciond_entry(self, name, conf_dir):
+        path = self._sciond_path(name)
+        return self._common_entry(
+            name, ["bin/sciond", "--api-addr", path, name, conf_dir])
+
+    def _sciond_path(self, name):
+        return os.path.join(SCIOND_API_SOCKDIR, "%s.sock" % name)
+
     def _zk_entries(self, topo_id):
         if topo_id not in self.zookeepers:
             return []
@@ -713,9 +721,16 @@ class SupervisorGenerator(object):
         for elem, entry in sorted(entries, key=lambda x: x[0]):
             names.append(elem)
             elem_dir = os.path.join(base, elem)
-            self._write_elem_conf(elem, entry, elem_dir)
+            self._write_elem_conf(elem, entry, elem_dir, topo_id)
             if self.mininet:
                 self._write_elem_mininet_conf(elem, elem_dir)
+        # Mininet runs sciond per element, and not at an AS level.
+        if not self.mininet:
+            sd_name = "sd%s" % topo_id
+            names.append(sd_name)
+            conf_dir = os.path.join(base, COMMON_DIR)
+            config["program:%s" % sd_name] = self._sciond_entry(
+                sd_name, conf_dir)
         config["group:as%s" % topo_id] = {"programs": ",".join(names)}
         text = StringIO()
         config.write(text)
@@ -723,17 +738,30 @@ class SupervisorGenerator(object):
                                  SUPERVISOR_CONF)
         write_file(conf_path, text.getvalue())
 
-    def _write_elem_conf(self, elem, entry, elem_dir):
+    def _write_elem_conf(self, elem, entry, elem_dir, topo_id=None):
         config = configparser.ConfigParser(interpolation=None)
         prog = self._common_entry(elem, entry, elem_dir)
         self._write_zlog_cfg(os.path.basename(entry[0]), elem, elem_dir)
         if self.mininet and not elem.startswith("br"):
+            # Start a dispatcher for every non-BR element under mininet.
             prog['environment'] += ',DISPATCHER_ID="%s"' % elem
             dp_name = "dp-" + elem
             dp = self._common_entry(dp_name, ["bin/dispatcher"], elem_dir)
             dp['environment'] += ',DISPATCHER_ID="%s"' % elem
             config["program:%s" % dp_name] = dp
             self._write_zlog_cfg("dispatcher", dp_name, elem_dir)
+        if elem.startswith("cs"):
+            if self.mininet:
+                # Start a sciond for every CS element under mininet.
+                sd_name = "sd-" + elem
+                config["program:%s" % sd_name] = self._sciond_entry(
+                    sd_name, elem_dir)
+                path = self._sciond_path(sd_name)
+                prog['environment'] += ',SCIOND_PATH="%s"' % path
+            else:
+                # Else set the SCIOND_PATH env to point to the per-AS sciond.
+                path = self._sciond_path("sd%s" % topo_id)
+                prog['environment'] += ',SCIOND_PATH="%s"' % path
         if elem.startswith("br") and self.router == "go":
             prog['environment'] += ',GODEBUG="cgocheck=0"'
         config["program:%s" % elem] = prog
@@ -765,12 +793,11 @@ class SupervisorGenerator(object):
     def _get_base_path(self, topo_id):
         return os.path.join(self.out_dir, topo_id.ISD(), topo_id.AS())
 
-    def _common_entry(self, name, cmd_args, elem_dir):
-        zlog = os.path.join(elem_dir, "%s.zlog.conf" % name)
+    def _common_entry(self, name, cmd_args, elem_dir=None):
         entry = {
             'autostart': 'false' if self.mininet else 'false',
             'autorestart': 'false',
-            'environment': 'PYTHONPATH=.,ZLOG_CFG="%s"' % zlog,
+            'environment': 'PYTHONPATH=.',
             'stdout_logfile': "NONE",
             'stderr_logfile': "NONE",
             'startretries': 0,
@@ -778,6 +805,9 @@ class SupervisorGenerator(object):
             'priority': 100,
             'command': self._mk_cmd(name, cmd_args),
         }
+        if elem_dir:
+            zlog = os.path.join(elem_dir, "%s.zlog.conf" % name)
+            entry['environment'] += ',ZLOG_CFG="%s"' % zlog
         if name == "dispatcher":
             entry['startsecs'] = 1
             entry['priority'] = 50

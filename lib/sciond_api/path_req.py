@@ -15,20 +15,17 @@
 :mod:`path_req` --- SCIOND path requests and replies
 ====================================================
 """
-# Stdlib
-import logging
-
 # External
 import capnp  # noqa
 
 # SCION
 import proto.sciond_capnp as P
-from lib.packet.host_addr import HostAddrIPv4, HostAddrIPv6
 from lib.packet.packet_base import Cerealizable
 from lib.packet.scion_addr import ISD_AS
 from lib.sciond_api.base import SCIONDMsgBase
+from lib.sciond_api.host_info import HostInfo
 from lib.sciond_api.path_meta import FwdPathMeta
-from lib.types import AddrType, SCIONDMsgType as SMT
+from lib.types import SCIONDMsgType as SMT
 
 
 class SCIONDPathRequest(SCIONDMsgBase):  # pragma: no cover
@@ -40,13 +37,12 @@ class SCIONDPathRequest(SCIONDMsgBase):  # pragma: no cover
     @classmethod
     def from_values(cls, id_, dst_ia, src_ia=None, max_paths=5,
                     flush=False, sibra=False):
-        p = cls.P_CLS.new_message(
-            id=id_, dst=int(dst_ia), maxPaths=max_paths)
+        p = cls.P_CLS.new_message(dst=int(dst_ia), maxPaths=max_paths)
         if src_ia is not None:
             p.src = int(src_ia)
         p.flags.flush = flush
         p.flags.sibra = sibra
-        return cls(p)
+        return cls(p, id_)
 
     def dst_ia(self):
         return ISD_AS(self.p.dst)
@@ -57,7 +53,7 @@ class SCIONDPathRequest(SCIONDMsgBase):  # pragma: no cover
         return None
 
     def short_desc(self):
-        desc = ["id=%d, dst=%s" % (self.p.id, self.dst_ia())]
+        desc = ["id=%d, dst=%s" % (self.id, self.dst_ia())]
         if self.p.src:
             desc.append("src=%s" % self.src_ia())
         desc.append("max_paths=%d" % self.p.maxPaths)
@@ -100,11 +96,11 @@ class SCIONDPathReply(SCIONDMsgBase):  # pragma: no cover
 
         :param entries: List of SCIONDPathReplyEntry objects.
         """
-        p = cls.P_CLS.new_message(id=id_, errorCode=error)
+        p = cls.P_CLS.new_message(errorCode=error)
         entries = p.init("entries", len(path_entries))
         for i, entry in enumerate(path_entries):
             entries[i] = entry.p
-        return cls(p)
+        return cls(p, id_)
 
     def iter_entries(self):
         for entry in self.p.entries:
@@ -114,7 +110,7 @@ class SCIONDPathReply(SCIONDMsgBase):  # pragma: no cover
         return SCIONDPathReplyEntry(self.p.entries[idx])
 
     def short_desc(self):
-        desc = ["id=%d error_code=%d" % (self.p.id, self.p.errorCode)]
+        desc = ["id=%d error_code=%d" % (self.id, self.p.errorCode)]
         for entry in self.iter_entries():
             for line in entry.short_desc().splitlines():
                 desc.append("  %s" % line)
@@ -130,25 +126,15 @@ class SCIONDPathReplyEntry(Cerealizable):  # pragma: no cover
         self._path = None
 
     @classmethod
-    def from_values(cls, path, addrs, port):
+    def from_values(cls, path, first_hop):
         """
         Returns a SCIONDPathReplyEntry object with the specified entries.
 
         :param path: The FwdPathMeta object.
-        :param addr: The list of first hop HostAddr object.
-        :param port: The first hop port.
+        :param first_hop: A HostInfo object for the first hop of the path.
         """
         assert isinstance(path, FwdPathMeta)
-        p = cls.P_CLS.new_message(path=path.p)
-        if port:
-            p.port = port
-        for addr in addrs:
-            if addr.TYPE == AddrType.IPV4:
-                p.addrs.ipv4 = addr.pack()
-            elif addr.TYPE == AddrType.IPV6:
-                p.addrs.ipv6 = addr.pack()
-            else:
-                logging.warning("Unsupported address type: %s" % addr.TYPE)
+        p = cls.P_CLS.new_message(path=path.p, hostInfo=first_hop.p)
         return cls(p)
 
     def path(self):
@@ -156,24 +142,14 @@ class SCIONDPathReplyEntry(Cerealizable):  # pragma: no cover
             self._path = FwdPathMeta(self.p.path)
         return self._path
 
-    def ipv4(self):
-        if self.p.addrs.ipv4:
-            return HostAddrIPv4(self.p.addrs.ipv4)
-        return None
-
-    def ipv6(self):
-        if self.p.addrs.ipv6:
-            return HostAddrIPv6(self.p.addrs.ipv6)
-        return None
+    def first_hop(self):
+        return HostInfo(self.p.hostInfo)
 
     def short_desc(self):
         desc = ["%s:" % self.NAME]
         desc.append("  %s" % self.path())
-        fh_str = ["  First Hop:"]
-        if self.ipv4():
-            fh_str.append("IPv4: %s" % self.ipv4())
-        if self.ipv6():
-            fh_str.append("IPv6: %s" % self.ipv6())
-        fh_str.append("Port: %d" % self.p.port)
-        desc.append(" ".join(fh_str))
+        desc.append("  First Hop: %s" % self.first_hop().short_desc())
         return "\n".join(desc)
+
+    def __str__(self):
+        return self.short_desc()
