@@ -378,7 +378,9 @@ class ScionSIG(SCIONElement):
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
         scion_sock = self._create_socket(sig_addr, self.sig_port)
-        self._socks.add(scion_sock, self._encap_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
+        print('sig addr is :', sig_addr)
+        print('sig port is :', self.sig_port)
+        self._socks.add(scion_sock, self._encap_accept)
 
 
         # killing event for all the threads
@@ -456,6 +458,7 @@ class ScionSIG(SCIONElement):
 
 
     def _encap_recv(self, sock):
+        print('INSIDE ENCAP_RECEIVE')
         packet = sock.recv()[0]
         if packet is None:
             return

@@ -44,6 +44,7 @@ from lib.types import SCIONDMsgType as SMT
 from lib.packet.scion import SCIONL4Packet, build_base_hdrs
 from lib.packet.scion_udp import SCIONUDPHeader
 from lib.packet.packet_base import PayloadRaw
+import lib.app.sciond as lib_sciond
 
 
 # GW has two interfaces and is running on localhost
@@ -215,17 +216,46 @@ class SCION_Sender(threading.Thread):
         self.api_addr = api_addr
         self.sock = sock
         self.run_event = run_event
+        self._connector = lib_sciond.init(api_addr)
         self._get_path(api) # IN THE FUTURE THE PATH SHOULD BE FETCHED ON REGULAR BASES
 
 
-    def _get_path(self, api):
+    def _get_path(self, api, flush=False):
+        """Request path via SCIOND API."""
+        path_entries = self._try_sciond_api(flush)
+        path_entry = path_entries[0]
+        self.path_meta = path_entry.path()
+        fh_info = path_entry.first_hop()
+        fh_addr = fh_info.ipv4()
+        if not fh_addr:
+            fh_addr = self.dst.host
+        port = fh_info.p.port or SCION_UDP_EH_DATA_PORT
+        self.first_hop = (fh_addr, port)
+
+
+    def _try_sciond_api(self, flush=False):
+        flags = lib_sciond.PathRequestFlags(flush=flush)
+        start = time.time()
+        while time.time() - start < API_TOUT:
+            try:
+                path_entries = lib_sciond.get_paths(
+                    self.dst.isd_as, flags=flags, connector=self._connector)
+            except lib_sciond.SCIONDLibError as e:
+                logging.error("Error during path lookup: %s" % e)
+                continue
+            return path_entries
+        logging.critical("Unable to get path from local api.")
+        kill_self()
+
+
+    '''def _get_path(self, api):
         if api:
             self._get_path_via_api()
         else:
-            self._get_path_direct()
+            self._get_path_direct()'''
 
 
-    def _get_path_via_api(self):
+    '''def _get_path_via_api(self):
         """Request path via SCIOND API."""
         response = self._try_sciond_api()
         path_entry = response.path_entry(0)
@@ -235,10 +265,10 @@ class SCION_Sender(threading.Thread):
             print('no fh_addr !!!')
             # fh_addr = self.dst.host
         port = path_entry.p.port or SCION_UDP_EH_DATA_PORT
-        self.first_hop = (fh_addr, port)
+        self.first_hop = (fh_addr, port)'''
 
 
-    def _try_sciond_api(self):
+    '''def _try_sciond_api(self):
         sock = ReliableSocket()
         request = SCIONDPathRequest.from_values(self._req_id, self.dst.isd_as)
         packed = request.pack_full()
@@ -266,7 +296,7 @@ class SCION_Sender(threading.Thread):
             print('Empty response from local api.')
         print('Unable to get path from local api.')
         sock.close()
-        kill_self()
+        kill_self()'''
 
 
     def _get_path_direct(self, flags=0):
@@ -298,13 +328,30 @@ class SCION_Sender(threading.Thread):
         print('***** SCION sender exited *****')
         sys.exit(1)
 
-    def _send_pck(self, spkt, next_=None):
+    '''def _send_pck(self, spkt, next_=None):
         next_hop, port = next_ or self.sd.get_first_hop(spkt)
         if next_hop is not None:
             print('Sending (via %s:%s):\n%s' % (next_hop, port, spkt))
             self.sock.send(spkt.pack(), (next_hop, port))
         if self.path_meta:
-            print('Interfaces: %s' % ', '.join([str(ifentry) for ifentry in self.path_meta.iter_ifs()]))
+            print('Interfaces: %s' % ', '.join([str(ifentry) for ifentry in self.path_meta.iter_ifs()]))'''
+
+
+    def _send_pck(self, spkt, next_=None):
+        if not next_:
+            try:
+                fh_info = lib_sciond.get_overlay_dest(
+                    spkt, connector=self._connector)
+            except lib_sciond.SCIONDLibError as e:
+                logging.error("Error getting first hop: %s" % e)
+                kill_self()
+            next_hop = fh_info.ipv4() or fh_info.ipv6()
+            port = fh_info.p.port
+        else:
+            next_hop, port = next_
+        assert next_hop is not None
+        logging.debug("Sending (via %s:%s):\n%s", next_hop, port, spkt)
+        self.sock.send(spkt.pack(), (next_hop, port))
 
 
     def _build_pck(self, path=None):
@@ -313,8 +360,7 @@ class SCION_Sender(threading.Thread):
         extensions = self._create_extensions()
         if path is None:
             path = self.path_meta.fwd_path()
-        spkt = SCIONL4Packet.from_values(
-            cmn_hdr, addr_hdr, path, extensions, l4_hdr)
+        spkt = SCIONL4Packet.from_values(cmn_hdr, addr_hdr, path, extensions, l4_hdr)
         spkt.set_payload(self._create_payload(spkt))
         spkt.update()
         return spkt
@@ -436,9 +482,10 @@ class ScionSIG(SCIONElement):
 
         # only destination for now is SIG at 1-12
         dest_ia = ISD_AS().from_values(1, 12)
-        dest_host = HostAddrIPv4('169.254.2.2')
+        dest_host = HostAddrIPv4('169.254.0.2')
         dest_port = 40500
         dest_sig_addr = SCIONAddr().from_values(dest_ia, dest_host)
+        print('destination sig addr is:', dest_sig_addr)
 
 
         # create a SCION_Sender that processes all the IP's buffers, decides which one to has the priority
@@ -510,6 +557,7 @@ def main(argv):
             sig_as = int(arg)
 
     conf_dir = "%s/ISD%d/AS%d/endhost" % (GEN_PATH, sig_isd, sig_as)
+    print('conf_dir is :', conf_dir)
     sig_ip_interface = haddr_parse_interface(sig_ip)
     sig_host = HostAddrIPv4(sig_ip_interface)
     sig = ScionSIG(sig_host, sig_port, conf_dir, sig_isd, sig_as)
