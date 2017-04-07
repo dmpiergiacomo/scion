@@ -47,7 +47,7 @@ from lib.packet.packet_base import PayloadRaw
 import lib.app.sciond as lib_sciond
 
 
-# GW has two interfaces and is running on localhost
+# SIG in 1-11
 ETH_LEGACY_IP = 'enp0s9'
 LEGACY_IP = '169.254.1.1'
 LEGACY_MAC = '08:00:27:e2:f7:59'
@@ -55,6 +55,16 @@ ETH_SCION = 'enp0s8'
 SCION_IP = '169.254.0.1'
 SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up the tests
 API_TOUT = 15
+
+'''
+# SIG in 1-12
+ETH_LEGACY_IP = 'enp0s9'
+LEGACY_IP = '169.254.2.1'
+LEGACY_MAC = '08:00:27:7d:70:04'
+ETH_SCION = 'enp0s8'
+SCION_IP = '169.254.0.2'
+SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up the tests
+API_TOUT = 15'''
 
 
 
@@ -88,10 +98,6 @@ class IP_Receiver(threading.Thread):
 
     def _run(self):
         print('IP Receiver Started')
-        sn = 0
-        index = 0
-        unused = 0
-
 
         # receive incoming IP packets and store thm in the IP buffer
         while (self.run_event.is_set()):
@@ -118,18 +124,7 @@ class IP_Receiver(threading.Thread):
                 dest_ia = ISD_AS().from_values(dest_isd, dest_as)
 
                 # add IP pck to stream
-                self._add_to_stream(dest_ia, sn, index, unused, ip_pck)
-                curr_pos = len(self.buf)
-
-                # update index
-                if curr_pos >= SCION_PCK_LEN:
-                    index = curr_pos % SCION_PCK_LEN
-
-                # Increment Sequence Number if sn >= 2^32-1
-                if sn < 4294967295:
-                    sn = sn + 1
-                else:
-                    sn = 0
+                self._add_to_stream(ip_pck)
 
         print('***** IP receiver exited *****')
         sys.exit(1)
@@ -165,19 +160,19 @@ class IP_Receiver(threading.Thread):
 
             # analyze only incoming packets
             if self._eth_addr(packet[0:6]) == LEGACY_MAC:
-                print('Destination MAC : ', self._eth_addr(packet[0:6]), ' Source MAC : ',
+                '''print('Destination MAC : ', self._eth_addr(packet[0:6]), ' Source MAC : ',
                       self._eth_addr(packet[6:12]),
                       ' Protocol : ', str(eth_protocol))
                 print('Version : ', str(version), ' IP Header Length : ', str(ihl), ' TTL : ', str(ttl),
                       ' Protocol : ', str(protocol), ' Source Address : ', str(s_addr), ' Destination Address : ',
-                      str(d_addr))
+                      str(d_addr))'''
 
                 return (packet[eth_length:], str(d_addr))
 
 
         # Parse ARP packets, ARP Protocol number = 1544 (0x0806)
         elif eth_protocol == 1544:
-            # do nothing for now.....
+            # discard ARP packet
             print('### ARP packet ###')
             return (None, None)
 
@@ -190,19 +185,17 @@ class IP_Receiver(threading.Thread):
         return b
 
 
-    def _add_to_stream(self, dest_ia, sn, index, unused, ip_pck):
-        # FOR NOW dest_ia IS ONLY 1-12, LATER THERE WILL BE A BYTE STREAM FOR EACH REMOTE ISD-AS
-        format = '!IHH%ss' % (len(ip_pck))
-        new_ip_pck = pack(format, sn, index, unused, ip_pck)
-        for i in new_ip_pck:
+    def _add_to_stream(self, ip_pck):
+        for i in ip_pck:
             self.buf.append(i)
+
 
 
 class SCION_Sender(threading.Thread):
     '''
     Class that encapsulate IP packets into SCION ones and send the SCION packet to the right remote SIG
     '''
-    def __init__(self, name, sd, api_addr, buf, addr, dst, dport, sock, run_event, api=True):
+    def __init__(self, name, api_addr, buf, addr, dst, dport, sock, run_event, api=True):
         threading.Thread.__init__(self)
         self.name = name
         self.buf = buf
@@ -212,12 +205,17 @@ class SCION_Sender(threading.Thread):
         self.path_meta = None
         self.first_hop = None
         self._req_id = 0
-        self.sd = sd
         self.api_addr = api_addr
         self.sock = sock
         self.run_event = run_event
         self._connector = lib_sciond.init(api_addr)
         self._get_path(api) # IN THE FUTURE THE PATH SHOULD BE FETCHED ON REGULAR BASES
+
+        self.sn = 0
+        self.index = 1
+        self.unused = 0
+        self.offset = 0
+        self.no_encap_counter = 0
 
 
     def _get_path(self, api, flush=False):
@@ -238,79 +236,13 @@ class SCION_Sender(threading.Thread):
         start = time.time()
         while time.time() - start < API_TOUT:
             try:
-                path_entries = lib_sciond.get_paths(
-                    self.dst.isd_as, flags=flags, connector=self._connector)
+                path_entries = lib_sciond.get_paths(self.dst.isd_as, src_ia=self.addr.isd_as, flags=flags, connector=self._connector)
             except lib_sciond.SCIONDLibError as e:
                 logging.error("Error during path lookup: %s" % e)
                 continue
             return path_entries
         logging.critical("Unable to get path from local api.")
         kill_self()
-
-
-    '''def _get_path(self, api):
-        if api:
-            self._get_path_via_api()
-        else:
-            self._get_path_direct()'''
-
-
-    '''def _get_path_via_api(self):
-        """Request path via SCIOND API."""
-        response = self._try_sciond_api()
-        path_entry = response.path_entry(0)
-        self.path_meta = path_entry.path()
-        fh_addr = path_entry.ipv4()
-        if not fh_addr:
-            print('no fh_addr !!!')
-            # fh_addr = self.dst.host
-        port = path_entry.p.port or SCION_UDP_EH_DATA_PORT
-        self.first_hop = (fh_addr, port)'''
-
-
-    '''def _try_sciond_api(self):
-        sock = ReliableSocket()
-        request = SCIONDPathRequest.from_values(self._req_id, self.dst.isd_as)
-        packed = request.pack_full()
-        self._req_id += 1
-        start = time.time()
-        try:
-            sock.connect(self.api_addr)
-        except OSError as e:
-            print('Error connecting to sciond: %s' % e)
-            kill_self()
-        while time.time() - start < API_TOUT:
-            print('Sending path request to local API at %s: %s' % (self.api_addr, request))
-            sock.send(packed)
-            data = sock.recv()[0]
-            if data:
-                response = parse_sciond_msg(data)
-                if response.MSG_TYPE != SMT.PATH_REPLY:
-                    print('Unexpected SCIOND msg type received: %s' % response.NAME)
-                    continue
-                if response.p.errorCode != SCIONDPathReplyError.OK:
-                    print('SCIOND returned an error (code=%d): %s' % (response.p.errorCode, SCIONDPathReplyError.describe(response.p.errorCode)))
-                    continue
-                sock.close()
-                return response
-            print('Empty response from local api.')
-        print('Unable to get path from local api.')
-        sock.close()
-        kill_self()'''
-
-
-    def _get_path_direct(self, flags=0):
-        """Request path from SCIOND object."""
-        paths = []
-        for _ in range(5):
-            paths, _ = self.sd.get_paths(self.dst.isd_as)
-            if paths:
-                break
-        else:
-            logging.critical("Unable to get path directly from sciond")
-            kill_self()
-        self.path_meta = paths[0]
-        self.first_hop = None
 
 
     def run(self):
@@ -322,26 +254,25 @@ class SCION_Sender(threading.Thread):
 
     def _run(self):
         print('SCION Sender Started')
+
         while (self.run_event.is_set()):
-            if len(self.buf) >= SCION_PCK_LEN:
+            if len(self.buf) >= (SCION_PCK_LEN - 8):
                 self._send_pck(self._build_pck(), self.first_hop)
+
+                # Increment Sequence Number if sn >= 2^32-1
+                if self.sn < 4294967295:
+                    self.sn = self.sn + 1
+                else:
+                    self.sn = 0
+
         print('***** SCION sender exited *****')
         sys.exit(1)
-
-    '''def _send_pck(self, spkt, next_=None):
-        next_hop, port = next_ or self.sd.get_first_hop(spkt)
-        if next_hop is not None:
-            print('Sending (via %s:%s):\n%s' % (next_hop, port, spkt))
-            self.sock.send(spkt.pack(), (next_hop, port))
-        if self.path_meta:
-            print('Interfaces: %s' % ', '.join([str(ifentry) for ifentry in self.path_meta.iter_ifs()]))'''
 
 
     def _send_pck(self, spkt, next_=None):
         if not next_:
             try:
-                fh_info = lib_sciond.get_overlay_dest(
-                    spkt, connector=self._connector)
+                fh_info = lib_sciond.get_overlay_dest(spkt, connector=self._connector)
             except lib_sciond.SCIONDLibError as e:
                 logging.error("Error getting first hop: %s" % e)
                 kill_self()
@@ -375,53 +306,129 @@ class SCION_Sender(threading.Thread):
 
 
     def _create_payload(self, spkt):
-        #return PayloadRaw(self.buf.read(SCION_PCK_LEN))
-        pck = bytearray()
-        for i in range(1, SCION_PCK_LEN + 1):
-            pck.append(self.buf.popleft())
-        return PayloadRaw(pck)
+        format = '!IHH%ss' % (SCION_PCK_LEN - 8)
+        pld = bytearray()
+        for i in range(0, SCION_PCK_LEN - 8):
+            pld.append(self.buf.popleft())
+        encap_pck = pack(format, self.sn, self.index, self.unused, pld)
+        print('pld: ', pld)
+        print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
+
+        # calcolate the index field
+        if self.no_encap_counter > 0:
+            # no encapsulated packets start in this payload
+            self.index = 0
+            self.no_encap_counter -= 1
+        else:
+            self.index = self.offset
+            self._offset_next_encap_pck(pld)
+
+        return PayloadRaw(encap_pck)
 
 
-class SCION_Receiver(threading.Thread, SCIONElement):
+    def _offset_next_encap_pck(self, payload):
+        previous_offset = self.offset
+
+        while self.offset < SCION_PCK_LEN:
+            ip_header = payload[self.offset:self.offset + 20]
+            iph = unpack('!BBHHHBBH4s4s', ip_header)
+            ip_length = iph[2]
+            self.offset = self.offset + ip_length
+
+        self.no_encap_counter = int((self.offset - (SCION_PCK_LEN - previous_offset))/ SCION_PCK_LEN)
+        self.offset = (self.offset - (SCION_PCK_LEN - previous_offset)) % SCION_PCK_LEN
+
+
+
+class IP_Sender(threading.Thread):
     '''
-    Class that encapsulate IP packets into SCION ones and send the SCION packet to the right remote SIG
+    Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
     '''
-    def __init__(self, name, buf, sock, run_event):
-        threading.Thread.__init__(self)
+    def __init__(self, name, dict, run_event):
         self.name = name
-        self.buf = buf
-        self.sock = sock
+        self.dict = dict
         self.run_event = run_event
-        self._socks.add(self.sock, self.handle_accept)  # SUBSTITUTE THE CALLBACK WITH SELF.ENCAP_ACCEPT !!!
 
 
     def run(self):
         try:
             self._run()
         finally:
-            logging.info("Scion Receiver NOT started !!!")
+            logging.info("IP Sender NOT started !!!")
 
 
     def _run(self):
-        print('SCION Receiver Started')
+        print('IP Sender Started')
         while (self.run_event.is_set()):
-            spck = self._recv()
-            print('SCION BUFFER BEFORE: ', len(self.buf))
-            if spck is not None:
-                for i in spck:
-                    self.buf.append(i)
-            print('SCION BUFFER AFTER: ', len(self.buf))
-        print('***** SCION receiver exited *****')
+            if len(self.dict) > 0:
+                self._send()
+
+        print('***** IP sender exited *****')
         sys.exit(1)
 
 
-    def _recv(self):
-        try:
-            packet = self.sock.recv()[0]
-            print('INSIDE TRY BLOCK')
-        except socket.timeout:
+    def _send(self):
+        print('****')
+
+
+    def _parse_scion_pck(self, sn, index, unused, payload):
+        decap_pck = Decapsulated_Packet(sn, index, unused)
+        eth_length = 14
+        remaining = payload
+        counter = 0
+
+        # prepend cut ip packet to the payload on the newest SCION packet
+        if self.dict[sn-1] is not None & self.dict[sn-1].get_cut_ip() is not None:
+            remaining = self.cut_ip + remaining
+        while len(remaining) is not 0:
+            # Parse IP header
+            # take first 20 characters for the ip header
+            ip_header = remaining[eth_length:20 + eth_length]
+
+            # now unpack them :)
+            iph = unpack('!BBHHHBBH4s4s', ip_header)
+
+            total_lenght = int(iph[2], 2)
+            if total_lenght < len(remaining):
+                ip_pcks[counter] = remaining[:total_lenght]
+                remaining = remaining[total_lenght:]
+                counter = counter + 1
+            else:
+                # ip packet is cut
+                self.cut_ip = remaining
+
+
+
+class Decapsulated_Packet(object):
+
+    def __init__(self, sn, index, unused, payload, parsed=False):
+        """
+        Create a decapsulated packed that keep track of the IP packets that were encapsulated into a specific SCION packet.
+        If an IP packet has been split into different SCION packets, this class helps to reassemble the original packet
+        """
+        self.sn = sn
+        self.index = index
+        self.unused = unused
+        self.payload = payload
+        self.parsed = parsed
+        self.ip_pcks = {}
+        self.cut_ip = None
+
+
+    def add_ip(self, order, pck):
+        self.ip_pcks[order] = pck
+
+
+    def update_cut_ip(self, data):
+        self.cut_ip = data
+
+
+    def get_cut_ip(self):
+        if self.parsed is not False:
+            return self.cut_ip
+        else:
             return None
-        return SCIONL4Packet(packet)
+
 
 
 
@@ -453,21 +460,23 @@ class ScionSIG(SCIONElement):
         sig_addr = SCIONAddr().from_values(sig_ia, self.sig_host)
 
         # create SIG instance and register to the SCION Daemon
-        sd, api_addr = self._run_sciond(self.conf_dir, sig_addr)
-
-
-        # set up ReliableSocket to Dispatcher
-        ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
-        scion_sock = self._create_socket(sig_addr, self.sig_port)
+        api_addr = SCIOND_API_SOCKDIR + "sd%s.sock" % sig_addr.isd_as
 
 
         # create IP byte stream
         # IN THE FUTURE THERE MUST BE A STREAM FOR EACH REMOTE AS
-        ipbuf = deque()
+        ip_buf = deque()
+
+        # create dictionary of SCION packets received
+        self.spcks_dict = {}
 
 
-        # create SCION stream
-        sbuf = deque()
+        # set up ReliableSocket to Dispatcher
+        ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
+        print('sig addr:', sig_addr)
+        print('sig port: ', self.sig_port)
+        scion_sock = self._create_socket(sig_addr, self.sig_port)
+        # self._socks.add(scion_sock, self._encap_accept)
 
 
         # killing event for all the threads
@@ -476,7 +485,7 @@ class ScionSIG(SCIONElement):
 
 
         # create an Ip_Receiver that processes all the incoming IP packets
-        ip_receiver = IP_Receiver("IP_Receiver-Thread", ipbuf, run_event)
+        ip_receiver = IP_Receiver("IP_Receiver-Thread", ip_buf, run_event)
         ip_receiver.start()
 
 
@@ -485,38 +494,46 @@ class ScionSIG(SCIONElement):
         dest_host = HostAddrIPv4('169.254.0.2')
         dest_port = 40500
         dest_sig_addr = SCIONAddr().from_values(dest_ia, dest_host)
-        print('destination sig addr is:', dest_sig_addr)
+
+        '''
+        # only destination for now is SIG at 1-11
+        dest_ia = ISD_AS().from_values(1, 11)
+        dest_host = HostAddrIPv4('169.254.0.1')
+        dest_port = 30100
+        dest_sig_addr = SCIONAddr().from_values(dest_ia, dest_host)'''
 
 
         # create a SCION_Sender that processes all the IP's buffers, decides which one to has the priority
         # and forwards the SCION packets to respective the remote SIG
-        scion_sender = SCION_Sender("SCION_Sender-Thread", sd, api_addr, ipbuf, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
+        scion_sender = SCION_Sender("SCION_Sender-Thread", api_addr, ip_buf, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
         scion_sender.start()
 
+        #create IP_Sender
+        #ip_sender = IP_Sender('IP_Sender-Thread', self.spcks_dict, run_event)
+        #ip_sender.start()
 
-        # create a SCION_Receiver that processes all the incoming SCION packets
-        #scion_receiver = SCION_Receiver('SCION_Receiver-Thread', sbuf, scion_sock, run_event)
-        #scion_receiver.start()
+        # loop for SCION Receiver
+        self._SCION_Receiver(run_event, scion_sock)
 
 
-        # kill all threads if needed
+    def _SCION_Receiver(self, event, sock):
         try:
             while 1:
-                time.sleep(.1)
+                self._encap_recv(sock)
+
+        # kill all threads if needed
         except KeyboardInterrupt:
-            print ('Attempting to close threads')
-            run_event.clear()
+            print('Attempting to close threads')
+            event.clear()
             time.sleep(1)
-            # stop SCIOND
-            sd.stop()
-            scion_sock.close()
-            print ('All threads successfully closed')
+            sock.close()
+            print('All threads successfully closed')
 
 
 
     def _run_sciond(self, conf_dir, sig_addr):
         # start SCION Daemon
-        api_addr = SCIOND_API_SOCKDIR + "%s_%s.sock" % (self.NAME, sig_addr.isd_as)
+        api_addr = SCIOND_API_SOCKDIR + "sd%s.sock" % (self.NAME, sig_addr.isd_as)
         return self._start_sciond(conf_dir, sig_addr, api=True, api_addr=api_addr), api_addr
 
 
@@ -530,7 +547,40 @@ class ScionSIG(SCIONElement):
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
         sock = ReliableSocket(reg=(sig_addr, sig_port, True, None))
+        #sock.settimeout(1.0)
         return sock
+
+
+    def _encap_accept(self, sock):
+        s = sock.accept()
+        if not s:
+            logging.error("accept failed")
+            return
+        self._socks.add(s, self._encap_recv)
+
+
+    def _encap_recv(self, sock):
+        packet = sock.recv()[0]
+        spck = SCIONL4Packet(packet)
+        pld = spck.get_payload()
+        if pld is None:
+            return
+        self._packet_put(pld)
+
+
+    def _packet_put(self, packet):
+        spck = packet.pack()
+        print('SCION pld received: ', spck)
+        sn, index, unused, payload = self._unpack_scion_pck(spck)
+        self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
+        print('added SCION pck with sn: ', sn)
+
+
+    def _unpack_scion_pck(self, spck):
+        print('spack lenght: ', len(spck))
+        format = '!IHH%ss' % (len(spck)-8)
+        sn, index, unused, payload = struct.unpack(format, spck)
+        return sn, index, unused, payload
 
 
 
@@ -557,7 +607,6 @@ def main(argv):
             sig_as = int(arg)
 
     conf_dir = "%s/ISD%d/AS%d/endhost" % (GEN_PATH, sig_isd, sig_as)
-    print('conf_dir is :', conf_dir)
     sig_ip_interface = haddr_parse_interface(sig_ip)
     sig_host = HostAddrIPv4(sig_ip_interface)
     sig = ScionSIG(sig_host, sig_port, conf_dir, sig_isd, sig_as)
