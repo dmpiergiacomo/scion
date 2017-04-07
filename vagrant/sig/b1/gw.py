@@ -552,7 +552,7 @@ class ScionSIG(SCIONElement):
         print('SCION pld received: ', spck)
         sn, index, unused, payload = self._unpack_scion_pck(spck)
         self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-        print('added SCION pck with sn: ', sn)
+        print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
 
     def _unpack_scion_pck(self, spck):
