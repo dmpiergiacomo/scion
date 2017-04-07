@@ -54,6 +54,7 @@ LEGACY_MAC = '08:00:27:e2:f7:59'
 ETH_SCION = 'enp0s8'
 SCION_IP = '169.254.0.1'
 SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up the tests
+SCION_PAYLOAD_LENGTH = SCION_PCK_LEN - 8
 API_TOUT = 15
 
 '''
@@ -306,22 +307,24 @@ class SCION_Sender(threading.Thread):
 
 
     def _create_payload(self, spkt):
-        format = '!IHH%ss' % (SCION_PCK_LEN - 8)
+        format = '!IHH%ss' % SCION_PAYLOAD_LENGTH
         pld = bytearray()
-        for i in range(0, SCION_PCK_LEN - 8):
+        for i in range(0, SCION_PAYLOAD_LENGTH):
             pld.append(self.buf.popleft())
         encap_pck = pack(format, self.sn, self.index, self.unused, pld)
-        print('pld: ', pld)
+        print('************************************')
         print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
 
         # calcolate the index field
         if self.no_encap_counter > 0:
+            print('no_encap_counter:', self.no_encap_counter)
             # no encapsulated packets start in this payload
             self.index = 0
             self.no_encap_counter -= 1
         else:
-            self.index = self.offset
+            print('\nNext loop parameters:')
             self._offset_next_encap_pck(pld)
+            self.index = self.offset
 
         return PayloadRaw(encap_pck)
 
@@ -329,14 +332,31 @@ class SCION_Sender(threading.Thread):
     def _offset_next_encap_pck(self, payload):
         previous_offset = self.offset
 
-        while self.offset < SCION_PCK_LEN:
+        while self.offset < SCION_PAYLOAD_LENGTH:
+            print('self.offset: ', self.offset)
             ip_header = payload[self.offset:self.offset + 20]
+            if len(ip_header) != 20:
+                print('extract missing header')
+                tmp = bytearray()
+                for i in range(0, (20 - len(ip_header))):
+                    tmp.append(self.buf.popleft())
+                ip_header = ip_header + tmp
+                print('tmp: ', tmp)
+                for i in tmp:
+                    self.buf.append(i)
+
+            print('ip_header: ', ip_header)
             iph = unpack('!BBHHHBBH4s4s', ip_header)
             ip_length = iph[2]
+            print('ip_length: ', ip_length)
             self.offset = self.offset + ip_length
+            print('self.offset: ', self.offset)
 
-        self.no_encap_counter = int((self.offset - (SCION_PCK_LEN - previous_offset))/ SCION_PCK_LEN)
-        self.offset = (self.offset - (SCION_PCK_LEN - previous_offset)) % SCION_PCK_LEN
+
+        self.no_encap_counter = int((self.offset - (SCION_PAYLOAD_LENGTH - previous_offset))/ SCION_PAYLOAD_LENGTH)
+        #self.offset = (self.offset - (SCION_PAYLOAD_LENGTH - previous_offset)) % SCION_PAYLOAD_LENGTH
+        self.offset = self.offset % SCION_PAYLOAD_LENGTH
+        print('self.offset: ', self.offset)
 
 
 
