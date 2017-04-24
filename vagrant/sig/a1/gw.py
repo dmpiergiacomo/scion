@@ -57,6 +57,8 @@ SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up 
 SCION_PAYLOAD_LENGTH = SCION_PCK_LEN - 8
 API_TOUT = 15
 
+LEGACY_HOST_SAME_AS = '169.254.1.2'
+
 '''
 # SIG in 1-12
 ETH_LEGACY_IP = 'enp0s9'
@@ -65,7 +67,9 @@ LEGACY_MAC = '08:00:27:7d:70:04'
 ETH_SCION = 'enp0s8'
 SCION_IP = '169.254.0.2'
 SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up the tests
-API_TOUT = 15'''
+SCION_PAYLOAD_LENGTH = SCION_PCK_LEN - 8
+API_TOUT = 15
+LEGACY_HOST_SAME_AS = '169.254.2.2' '''
 
 
 
@@ -364,9 +368,11 @@ class IP_Sender(threading.Thread):
     '''
     Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
     '''
-    def __init__(self, name, dict, run_event):
+    def __init__(self, name, dict, discarded_spcks, run_event):
+        threading.Thread.__init__(self)
         self.name = name
         self.dict = dict
+        self.discorded_spcks = discarded_spcks
         self.run_event = run_event
 
 
@@ -379,16 +385,32 @@ class IP_Sender(threading.Thread):
 
     def _run(self):
         print('IP Sender Started')
+        counter = 0
         while (self.run_event.is_set()):
             if len(self.dict) > 0:
-                self._send()
+                if counter in self.dict:
+                    self._send(counter)
+                    del self.dict[counter]
+                else:
+                    time.sleep(1)
+                    print('waited 1 second')
+                # try again after 1 second or drop the packet
+                if counter in self.dict:
+                    self._send(counter)
+                    del self.dict[counter]
+                else:
+                    self.discorded_spcks.append(counter)
+
+                counter = (counter +1) % 4294967296
 
         print('***** IP sender exited *****')
         sys.exit(1)
 
 
-    def _send(self):
-        print('****')
+    def _send(self, sn):
+        spck = self.dict[sn]
+        index = spck.index
+        print('index pck to send is: ', index)
 
 
     def _parse_scion_pck(self, sn, index, unused, payload):
@@ -490,6 +512,8 @@ class ScionSIG(SCIONElement):
         # create dictionary of SCION packets received
         self.spcks_dict = {}
 
+        # list of all the discarded scion packets received out of order
+        self.discarded_spcks = []
 
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
@@ -528,9 +552,9 @@ class ScionSIG(SCIONElement):
         scion_sender = SCION_Sender("SCION_Sender-Thread", api_addr, ip_buf, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
         scion_sender.start()
 
-        #create IP_Sender
-        #ip_sender = IP_Sender('IP_Sender-Thread', self.spcks_dict, run_event)
-        #ip_sender.start()
+        # create IP_Sender
+        ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.discarded_spcks, run_event)
+        ip_sender.start()
 
         # loop for SCION Receiver
         self._SCION_Receiver(run_event, scion_sock)
@@ -592,12 +616,15 @@ class ScionSIG(SCIONElement):
         spck = packet.pack()
         print('SCION pld received: ', spck)
         sn, index, unused, payload = self._unpack_scion_pck(spck)
-        self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-        print('added SCION pck with sn: %s and index: %s' % (sn, index))
+        if sn in self.discarded_spcks:
+            print('scion packet received out of order and in late')
+        else:
+            self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
+            print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
 
     def _unpack_scion_pck(self, spck):
-        print('spack lenght: ', len(spck))
+        print('spck lenght: ', len(spck))
         format = '!IHH%ss' % (len(spck)-8)
         sn, index, unused, payload = struct.unpack(format, spck)
         return sn, index, unused, payload

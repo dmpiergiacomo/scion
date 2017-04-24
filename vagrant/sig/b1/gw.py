@@ -54,7 +54,10 @@ LEGACY_MAC = '08:00:27:e2:f7:59'
 ETH_SCION = 'enp0s8'
 SCION_IP = '169.254.0.1'
 SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up the tests
-API_TOUT = 15'''
+SCION_PAYLOAD_LENGTH = SCION_PCK_LEN - 8
+API_TOUT = 15
+
+LEGACY_HOST_SAME_AS = '169.254.1.2' '''
 
 
 # SIG in 1-12
@@ -64,8 +67,10 @@ LEGACY_MAC = '08:00:27:7d:70:04'
 ETH_SCION = 'enp0s8'
 SCION_IP = '169.254.0.2'
 SCION_PCK_LEN = 2**7 # can be between 0 and 2^16-1, I kept it small to speed up the tests
+SCION_PAYLOAD_LENGTH = SCION_PCK_LEN - 8
 API_TOUT = 15
 
+LEGACY_HOST_SAME_AS = '169.254.2.2'
 
 
 class IP_Receiver(threading.Thread):
@@ -98,10 +103,6 @@ class IP_Receiver(threading.Thread):
 
     def _run(self):
         print('IP Receiver Started')
-        sn = 0
-        index = 0
-        unused = 0
-
 
         # receive incoming IP packets and store thm in the IP buffer
         while (self.run_event.is_set()):
@@ -128,18 +129,7 @@ class IP_Receiver(threading.Thread):
                 dest_ia = ISD_AS().from_values(dest_isd, dest_as)
 
                 # add IP pck to stream
-                self._add_to_stream(dest_ia, sn, index, unused, ip_pck)
-                curr_pos = len(self.buf)
-
-                # update index
-                if curr_pos >= SCION_PCK_LEN:
-                    index = curr_pos % SCION_PCK_LEN
-
-                # Increment Sequence Number if sn >= 2^32-1
-                if sn < 4294967295:
-                    sn = sn + 1
-                else:
-                    sn = 0
+                self._add_to_stream(ip_pck)
 
         print('***** IP receiver exited *****')
         sys.exit(1)
@@ -187,7 +177,7 @@ class IP_Receiver(threading.Thread):
 
         # Parse ARP packets, ARP Protocol number = 1544 (0x0806)
         elif eth_protocol == 1544:
-            # do nothing for now.....
+            # discard ARP packet
             print('### ARP packet ###')
             return (None, None)
 
@@ -200,14 +190,10 @@ class IP_Receiver(threading.Thread):
         return b
 
 
-    def _add_to_stream(self, dest_ia, sn, index, unused, ip_pck):
-        # FOR NOW dest_ia IS ONLY 1-12, LATER THERE WILL BE A BYTE STREAM FOR EACH REMOTE ISD-AS
-        format = '!IHH%ss' % (len(ip_pck))
-        new_ip_pck = pack(format, sn, index, unused, ip_pck)
-        print('sn: %s\nindex: %s\nip_pck: %s' %(sn, index, ip_pck))
-        print('new_ip_pck: ', new_ip_pck)
-        for i in new_ip_pck:
+    def _add_to_stream(self, ip_pck):
+        for i in ip_pck:
             self.buf.append(i)
+
 
 
 class SCION_Sender(threading.Thread):
@@ -229,6 +215,12 @@ class SCION_Sender(threading.Thread):
         self.run_event = run_event
         self._connector = lib_sciond.init(api_addr)
         self._get_path(api) # IN THE FUTURE THE PATH SHOULD BE FETCHED ON REGULAR BASES
+
+        self.sn = 0
+        self.index = 1
+        self.unused = 0
+        self.offset = 0
+        self.no_encap_counter = 0
 
 
     def _get_path(self, api, flush=False):
@@ -267,9 +259,17 @@ class SCION_Sender(threading.Thread):
 
     def _run(self):
         print('SCION Sender Started')
+
         while (self.run_event.is_set()):
-            if len(self.buf) >= SCION_PCK_LEN:
+            if len(self.buf) >= (SCION_PCK_LEN - 8):
                 self._send_pck(self._build_pck(), self.first_hop)
+
+                # Increment Sequence Number if sn >= 2^32-1
+                if self.sn < 4294967295:
+                    self.sn = self.sn + 1
+                else:
+                    self.sn = 0
+
         print('***** SCION sender exited *****')
         sys.exit(1)
 
@@ -311,22 +311,76 @@ class SCION_Sender(threading.Thread):
 
 
     def _create_payload(self, spkt):
-        #return PayloadRaw(self.buf.read(SCION_PCK_LEN))
-        pck = bytearray()
-        for i in range(1, SCION_PCK_LEN + 1):
-            pck.append(self.buf.popleft())
-        print('SCION pck payload length: ',len(pck))
-        return PayloadRaw(pck)
+        format = '!IHH%ss' % SCION_PAYLOAD_LENGTH
+        pld = bytearray()
+        for i in range(0, SCION_PAYLOAD_LENGTH):
+            pld.append(self.buf.popleft())
+        encap_pck = pack(format, self.sn, self.index, self.unused, pld)
+        print('************************************')
+        print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
+
+        # calcolate the index field
+        if self.no_encap_counter > 0:
+            print('no_encap_counter:', self.no_encap_counter)
+            # no encapsulated packets start in this payload
+            self.index = 0
+            self.no_encap_counter -= 1
+        else:
+            print('\nNext loop parameters:')
+            self._offset_next_encap_pck(pld)
+            self.index = self.offset
+
+        return PayloadRaw(encap_pck)
+
+
+    def _offset_next_encap_pck(self, payload):
+        previous_offset = self.offset
+
+        while self.offset < SCION_PAYLOAD_LENGTH:
+            print('self.offset: ', self.offset)
+            ip_header = payload[self.offset:self.offset + 20]
+            if len(ip_header) != 20:
+                print('extract missing header')
+                tmp = bytearray()
+                for i in range(0, (20 - len(ip_header))):
+                    tmp.append(self.buf.popleft())
+                ip_header = ip_header + tmp
+                print('tmp: ', tmp)
+                for i in tmp:
+                    self.buf.append(i)
+
+            print('ip_header: ', ip_header)
+            iph = unpack('!BBHHHBBH4s4s', ip_header)
+            ip_length = iph[2]
+            print('ip_length: ', ip_length)
+            self.offset = self.offset + ip_length
+            print('self.offset: ', self.offset)
+
+
+        self.no_encap_counter = int((self.offset - (SCION_PAYLOAD_LENGTH - previous_offset))/ SCION_PAYLOAD_LENGTH)
+        #self.offset = (self.offset - (SCION_PAYLOAD_LENGTH - previous_offset)) % SCION_PAYLOAD_LENGTH
+        self.offset = self.offset % SCION_PAYLOAD_LENGTH
+        print('self.offset: ', self.offset)
+
 
 
 class IP_Sender(threading.Thread):
     '''
     Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
     '''
-    def __init__(self, name, dict, run_event):
+    def __init__(self, name, dict, discarded_spcks, run_event):
+        threading.Thread.__init__(self)
         self.name = name
         self.dict = dict
+        self.discorded_spcks = discarded_spcks
         self.run_event = run_event
+
+        ICMP_CODE = socket.getprotobyname('icmp')
+        self.ipsock = socket.socket(socket.AF_INET, socket.SOCK_RAW, ICMP_CODE)
+
+        self.remaining = None
+        self.offset = None
+        self.last_processed_spck = None
 
 
     def run(self):
@@ -338,16 +392,73 @@ class IP_Sender(threading.Thread):
 
     def _run(self):
         print('IP Sender Started')
+        counter = 0
         while (self.run_event.is_set()):
             if len(self.dict) > 0:
-                self._send()
+                if counter in self.dict:
+                    self._send_procedure(counter)
+                    del self.dict[counter]
+                else:
+                    time.sleep(1)
+                    print('waited 1 second')
+                # try again after 1 second or drop the packet
+                if counter in self.dict:
+                    self._send_procedure(counter)
+                    del self.dict[counter]
+                else:
+                    self.discorded_spcks.append(counter)
+
+                counter = (counter +1) % 4294967296
 
         print('***** IP sender exited *****')
         sys.exit(1)
 
 
-    def _send(self):
-        print('****')
+    def _send_procedure(self, sn):
+        spck = self.dict[sn]
+        index = spck.index
+        self._send_ip_pcks(spck)
+        print('index pck to send is: ', index)
+
+
+    def _send_ip_pcks(self, spck):
+        sn = spck.sn
+        index = spck.index
+        self.offset = index
+        payload = spck.payload
+        ip_len = 0
+
+        # send remaining payload of sn-1
+        if ((self.remaining is not None) & (self.last_processed_spck == sn-1)):
+            payload = self.remaining + payload
+            ip_len = len(self.remaining) + index
+            ip_pld = payload[0:ip_len]
+            self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+
+        #send payload of sn
+        if index != 0:
+            while self.offset < SCION_PAYLOAD_LENGTH:
+                ip_header = spck.payload[self.offset + ip_len:self.offset + ip_len + 20]
+                if len(ip_header) != 20:
+                    self.remaining = ip_header
+                    self.last_processed_spck = sn
+                    break
+
+                print('ip_header: ', ip_header)
+                iph = unpack('!BBHHHBBH4s4s', ip_header)
+                ip_len = iph[2]
+                ip_pld = payload[self.offset:self.offset + ip_len]
+                if self.offset+ip_len < SCION_PAYLOAD_LENGTH:
+                    self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+                    self.offset = self.offset + ip_len
+                else:
+                    self.remaining = ip_header + ip_pld
+                    self.last_processed_spck = sn
+                    break
+
+        else:
+            self.remaining = self.remaining + payload
+
 
 
     def _parse_scion_pck(self, sn, index, unused, payload):
@@ -444,11 +555,13 @@ class ScionSIG(SCIONElement):
 
         # create IP byte stream
         # IN THE FUTURE THERE MUST BE A STREAM FOR EACH REMOTE AS
-        ipbufin = deque()
+        ip_buf = deque()
 
         # create dictionary of SCION packets received
         self.spcks_dict = {}
 
+        # list of all the discarded scion packets received out of order
+        self.discarded_spcks = []
 
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
@@ -464,7 +577,7 @@ class ScionSIG(SCIONElement):
 
 
         # create an Ip_Receiver that processes all the incoming IP packets
-        ip_receiver = IP_Receiver("IP_Receiver-Thread", ipbufin, run_event)
+        ip_receiver = IP_Receiver("IP_Receiver-Thread", ip_buf, run_event)
         ip_receiver.start()
 
         '''
@@ -484,12 +597,12 @@ class ScionSIG(SCIONElement):
 
         # create a SCION_Sender that processes all the IP's buffers, decides which one to has the priority
         # and forwards the SCION packets to respective the remote SIG
-        scion_sender = SCION_Sender("SCION_Sender-Thread", api_addr, ipbufin, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
+        scion_sender = SCION_Sender("SCION_Sender-Thread", api_addr, ip_buf, sig_addr, dest_sig_addr, dest_port, scion_sock, run_event, api=True)
         scion_sender.start()
 
-        #create IP_Sender
-        #ip_sender = IP_Sender('IP_Sender-Thread', self.spcks_dict, run_event)
-        #ip_sender.start()
+        # create IP_Sender
+        ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.discarded_spcks, run_event)
+        ip_sender.start()
 
         # loop for SCION Receiver
         self._SCION_Receiver(run_event, scion_sock)
@@ -551,12 +664,15 @@ class ScionSIG(SCIONElement):
         spck = packet.pack()
         print('SCION pld received: ', spck)
         sn, index, unused, payload = self._unpack_scion_pck(spck)
-        self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-        print('added SCION pck with sn: %s and index: %s' % (sn, index))
+        if sn in self.discarded_spcks:
+            print('scion packet received out of order and in late')
+        else:
+            self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
+            print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
 
     def _unpack_scion_pck(self, spck):
-        print('spack lenght: ', len(spck))
+        print('spck lenght: ', len(spck))
         format = '!IHH%ss' % (len(spck)-8)
         sn, index, unused, payload = struct.unpack(format, spck)
         return sn, index, unused, payload
