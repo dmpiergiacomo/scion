@@ -369,11 +369,11 @@ class IP_Sender(threading.Thread):
     '''
     Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
     '''
-    def __init__(self, name, dict, discarded_spcks, run_event):
+    def __init__(self, name, dict, out_of_order_time, run_event):
         threading.Thread.__init__(self)
         self.name = name
         self.dict = dict
-        self.discarded_spcks = discarded_spcks
+        self.out_of_order_time = out_of_order_time
         self.run_event = run_event
 
         ICMP_CODE = socket.getprotobyname('icmp')
@@ -383,7 +383,11 @@ class IP_Sender(threading.Thread):
         self.offset = None
         self.last_processed_spck = None
 
-        self.splitIPs_dict = {}
+        # splitIP_tail[sn] contains the last fragment of the last IP pck contained in SCION pck with SN-1
+        self.splitIP_tail = {}
+        # splitIP_head[sn] contains the first fragment of the last IP pck contained in SCION pck SN
+        # or an intermediary fragment if index=0
+        self.splitIP_head = {}
 
 
     def run(self):
@@ -400,7 +404,6 @@ class IP_Sender(threading.Thread):
             if len(self.dict) > 0:
                 if self.dict.get(sn_to_send) is not None:
                     self._send_procedure(sn_to_send)
-                    del self.dict[sn_to_send]
 
                 sn_to_send = (sn_to_send +1) % 4294967296
 
@@ -416,18 +419,20 @@ class IP_Sender(threading.Thread):
 
         # no IP packets starts in this payload
         if index == 0:
-            self.splitIPs_dict[sn] = (False, payload)  # tuple: (IP_pck_starts_in_this_elem, part_of_payload_of_fragmented_pck)
+            self.splitIP_head[sn] = (False, payload)  # tuple: (IP_pck_starts_in_this_elem, part_of_payload_of_fragmented_pck)
+
+            # packet processed, time to remove it from dictionary
+            del self.dict[sn]
         else:
             self._send_previous_fragmented_ip_pck(spck)
             self._send_current_ip_pcks(spck)
-            self._send_ip_pcks(spck)
 
 
     def _send_previous_fragmented_ip_pck(self, spck):
         sn = spck.sn
         index = spck.index
 
-        if self.splitIPs_dict.get((sn-1)%4294967296) is not None:
+        if self.splitIP_head.get((sn-1)%4294967296) is not None:
             if index == 1:
                 # if the previous IP pck had index=0 it has not been sent yet and it has to be sent
                 pld = None
@@ -435,22 +440,34 @@ class IP_Sender(threading.Thread):
                 # when index>1 part of the previous IP pck is in the current encap pck
                 pld = spck.payload[:index]
 
-            iterator = sn
+            iterator = (sn-1)%4294967296
+            retrieved_fragments = []
             while(True):
-                pld = self.splitIPs_dict[(iterator-1)%4294967296][1] + pld
-                iterator = (iterator-1)%4294967296
-
-                if self.splitIPs_dict.get(iterator) is None:
+                if self.splitIP_head.get(iterator) is None:
                     # part of pck has been lost
                     pld = None
                     break
-                elif self.splitIPs_dict[iterator][0] == False:
+                elif self.splitIP_head[iterator][0] == True:
                     # starting point of the IP pck found
-                    pld = self.splitIPs_dict[iterator][1] + pld
+                    pld = self.splitIP_head[iterator][1] + pld
+                    retrieved_fragments.append(iterator)
                     break
+                elif self.splitIP_head[iterator][0] == False:
+                    # starting point of the IP pck not found
+                    pld = self.splitIP_head[iterator][1] + pld
+                    retrieved_fragments.append(iterator)
+
+                iterator = (iterator - 1) % 4294967296
 
             if pld is not None:
                 self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+                for i in retrieved_fragments:
+                    # remove from dictionary packets sent correctly
+                    del self.dict[i]
+
+        else:
+            # it means that the packet with sequence number = SN-1 was lost
+            self.splitIP_tail[sn] = spck.payload[:index]
 
 
     def _send_current_ip_pcks(self, spck):
@@ -460,21 +477,25 @@ class IP_Sender(threading.Thread):
         self.offset = index
         ip_len = 0
 
-        while self.offset < SCION_PAYLOAD_LENGTH:
+        while self.offset <= SCION_PAYLOAD_LENGTH:
             ip_header = pld[self.offset + ip_len:self.offset + ip_len + 20]
             if len(ip_header) != 20:
-                self.splitIPs_dict[sn] = ip_header
+                self.splitIP_head[sn] = (True, ip_header)
+                # packet processed, time to remove it from dictionary
+                del self.dict[sn]
                 break
 
             else:
                 iph = unpack('!BBHHHBBH4s4s', ip_header)
                 ip_len = iph[2]
                 ip_pck = pld[self.offset:self.offset + ip_len]
-                if self.offset + ip_len < SCION_PAYLOAD_LENGTH:
+                if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
                     self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
                     self.offset = self.offset + ip_len
                 else:
-                    self.splitIPs_dict[sn] = ip_header
+                    self.splitIP_head[sn] = (True, ip_pck)
+                    # packet processed, time to remove it from dictionary
+                    del self.dict[sn]
                     break
 
 
@@ -544,6 +565,37 @@ class IP_Sender(threading.Thread):
                 # ip packet is cut
                 self.cut_ip = remaining
 
+
+class Send_Delayed_Packets(threading.Thread):
+    '''
+    Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
+    '''
+    def __init__(self, name, out_order_time, run_event):
+        threading.Thread.__init__(self)
+        self.name = name
+        self.out_order_time = out_order_time
+        self.run_event = run_event
+
+    def run(self):
+        try:
+            self._run()
+        finally:
+            logging.info("Send_Delayed_Packets NOT started !!!")
+
+
+    def _run(self):
+        print('Send_Delayed_Packets Started')
+
+        while (self.run_event.is_set()):
+
+
+        print('***** Send_Delayed_Packets sender exited *****')
+        sys.exit(1)
+
+    ''' also this thread has to have _send_previous_fragmented_ip_pck() and _send_current_ip_pcks() methods.
+    There will be a loop that will check inside the array out_of_order_time, will check that the time expired
+    is not more than 1/2 RTT and will first try to _send_previous_fragmented_ip_pck() using the content of
+    splitIP_head array and then try to _send_current_ip_pcks() using the content of splitIP_tail array.'''
 
 
 class Decapsulated_Packet(object):
@@ -658,12 +710,12 @@ class ScionSIG(SCIONElement):
         scion_sender.start()
 
         # create IP_Sender
-        ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.discarded_spcks, run_event)
+        ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.out_of_order_time, run_event)
         ip_sender.start()
 
         # create Flush_TimeArray thread
-        flush_time = Flush_TimeArray("Flush_TimeArray-Thread", self.out_of_order_time, run_event)
-        flush_time.start()
+        delayed_pcks = Send_Delayed_Packets("Send_Delayed_Packets-Thread", self.out_of_order_time, run_event)
+        delayed_pcks.start()
 
         # loop for SCION Receiver
         self._SCION_Receiver(run_event, scion_sock)
