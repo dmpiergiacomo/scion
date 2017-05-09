@@ -23,6 +23,7 @@ import logging
 from lib.thread import kill_self
 import threading
 from collections import deque
+import datetime
 
 import pcapy
 
@@ -372,7 +373,7 @@ class IP_Sender(threading.Thread):
         threading.Thread.__init__(self)
         self.name = name
         self.dict = dict
-        self.discorded_spcks = discarded_spcks
+        self.discarded_spcks = discarded_spcks
         self.run_event = run_event
 
         ICMP_CODE = socket.getprotobyname('icmp')
@@ -381,6 +382,8 @@ class IP_Sender(threading.Thread):
         self.remaining = None
         self.offset = None
         self.last_processed_spck = None
+
+        self.splitIPs_dict = {}
 
 
     def run(self):
@@ -392,23 +395,14 @@ class IP_Sender(threading.Thread):
 
     def _run(self):
         print('IP Sender Started')
-        counter = 0
+        sn_to_send = 0
         while (self.run_event.is_set()):
             if len(self.dict) > 0:
-                if counter in self.dict:
-                    self._send_procedure(counter)
-                    del self.dict[counter]
-                else:
-                    time.sleep(1)
-                    print('waited 1 second')
-                # try again after 1 second or drop the packet
-                if counter in self.dict:
-                    self._send_procedure(counter)
-                    del self.dict[counter]
-                else:
-                    self.discorded_spcks.append(counter)
+                if self.dict.get(sn_to_send) is not None:
+                    self._send_procedure(sn_to_send)
+                    del self.dict[sn_to_send]
 
-                counter = (counter +1) % 4294967296
+                sn_to_send = (sn_to_send +1) % 4294967296
 
         print('***** IP sender exited *****')
         sys.exit(1)
@@ -417,11 +411,74 @@ class IP_Sender(threading.Thread):
     def _send_procedure(self, sn):
         spck = self.dict[sn]
         index = spck.index
-        self._send_ip_pcks(spck)
+        payload = spck.payload
         print('index pck to send is: ', index)
 
+        # no IP packets starts in this payload
+        if index == 0:
+            self.splitIPs_dict[sn] = (False, payload)  # tuple: (IP_pck_starts_in_this_elem, part_of_payload_of_fragmented_pck)
+        else:
+            self._send_previous_fragmented_ip_pck(spck)
+            self._send_current_ip_pcks(spck)
+            self._send_ip_pcks(spck)
 
-    def _send_ip_pcks(self, spck):
+
+    def _send_previous_fragmented_ip_pck(self, spck):
+        sn = spck.sn
+        index = spck.index
+
+        if self.splitIPs_dict.get((sn-1)%4294967296) is not None:
+            if index == 1:
+                # if the previous IP pck had index=0 it has not been sent yet and it has to be sent
+                pld = None
+            else:
+                # when index>1 part of the previous IP pck is in the current encap pck
+                pld = spck.payload[:index]
+
+            iterator = sn
+            while(True):
+                pld = self.splitIPs_dict[(iterator-1)%4294967296][1] + pld
+                iterator = (iterator-1)%4294967296
+
+                if self.splitIPs_dict.get(iterator) is None:
+                    # part of pck has been lost
+                    pld = None
+                    break
+                elif self.splitIPs_dict[iterator][0] == False:
+                    # starting point of the IP pck found
+                    pld = self.splitIPs_dict[iterator][1] + pld
+                    break
+
+            if pld is not None:
+                self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+
+
+    def _send_current_ip_pcks(self, spck):
+        sn = spck.sn
+        index = spck.index
+        pld = spck.payload
+        self.offset = index
+        ip_len = 0
+
+        while self.offset < SCION_PAYLOAD_LENGTH:
+            ip_header = pld[self.offset + ip_len:self.offset + ip_len + 20]
+            if len(ip_header) != 20:
+                self.splitIPs_dict[sn] = ip_header
+                break
+
+            else:
+                iph = unpack('!BBHHHBBH4s4s', ip_header)
+                ip_len = iph[2]
+                ip_pck = pld[self.offset:self.offset + ip_len]
+                if self.offset + ip_len < SCION_PAYLOAD_LENGTH:
+                    self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
+                    self.offset = self.offset + ip_len
+                else:
+                    self.splitIPs_dict[sn] = ip_header
+                    break
+
+
+    def _send_ip_pcks_old(self, spck):
         sn = spck.sn
         index = spck.index
         self.offset = index
@@ -560,8 +617,8 @@ class ScionSIG(SCIONElement):
         # create dictionary of SCION packets received
         self.spcks_dict = {}
 
-        # list of all the discarded scion packets received out of order
-        self.discarded_spcks = []
+        # times when packets out of order are received
+        self.out_of_order_time = []
 
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
@@ -604,14 +661,20 @@ class ScionSIG(SCIONElement):
         ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.discarded_spcks, run_event)
         ip_sender.start()
 
+        # create Flush_TimeArray thread
+        flush_time = Flush_TimeArray("Flush_TimeArray-Thread", self.out_of_order_time, run_event)
+        flush_time.start()
+
         # loop for SCION Receiver
         self._SCION_Receiver(run_event, scion_sock)
 
 
     def _SCION_Receiver(self, event, sock):
+        self.sn_expected = 0
         try:
             while 1:
                 self._encap_recv(sock)
+                self.sn_expected = (self.sn_expected + 1) % 4294967296
 
         # kill all threads if needed
         except KeyboardInterrupt:
@@ -662,17 +725,38 @@ class ScionSIG(SCIONElement):
 
     def _packet_put(self, packet):
         spck = packet.pack()
-        print('SCION pld received: ', spck)
+        #print('SCION pld received: ', spck)
         sn, index, unused, payload = self._unpack_scion_pck(spck)
-        if sn in self.discarded_spcks:
+
+        # if packets lost
+        if sn != self.sn_expected:
+            current_time = datetime.datetime.time(datetime.datetime.now())
+
+            # the packets lost can be more than 1
+            for i in range (self.sn_expected, ((sn-1)% 4294967296)):
+                print('packet with sn= %s was lost' % i)
+                self.out_of_order_time.insert(0, (i, current_time)) #insert on the left ---> TO BE REMOVED USING pop()
+
+        self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
+        print('added SCION pck with sn: %s and index: %s' % (sn, index))
+
+        print('************************************')
+
+
+    '''def _packet_put_old(self, packet):
+        spck = packet.pack()
+        #print('SCION pld received: ', spck)
+        sn, index, unused, payload = self._unpack_scion_pck(spck)
+        if self.discarded_spcks[sn] == True:
             print('scion packet received out of order and in late')
         else:
             self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
             print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
+        print('************************************')'''
+
 
     def _unpack_scion_pck(self, spck):
-        print('spck lenght: ', len(spck))
         format = '!IHH%ss' % (len(spck)-8)
         sn, index, unused, payload = struct.unpack(format, spck)
         return sn, index, unused, payload
