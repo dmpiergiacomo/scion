@@ -371,14 +371,13 @@ class IP_Sender(threading.Thread):
     '''
     Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
     '''
-    def __init__(self, name, dict, splitIP_tail, splitIP_head, run_event):
+    def __init__(self, name, dict, splitIP_tail, splitIP_head, ipsock, run_event):
         threading.Thread.__init__(self)
         self.name = name
         self.dict = dict
+        self.ipsock = ipsock
         self.run_event = run_event
 
-        ICMP_CODE = socket.getprotobyname('icmp')
-        self.ipsock = socket.socket(socket.AF_INET, socket.SOCK_RAW, ICMP_CODE)
 
         self.remaining = None
         self.offset = None
@@ -416,7 +415,6 @@ class IP_Sender(threading.Thread):
         spck = self.dict[sn]
         index = spck.index
         payload = spck.payload
-        print('index pck to send is: ', index)
 
         # no IP packets starts in this payload
         if index == 0:
@@ -425,6 +423,7 @@ class IP_Sender(threading.Thread):
             # packet processed, time to remove it from dictionary
             del self.dict[sn]
         else:
+            print('try to send pck')
             self._send_previous_fragmented_ip_pck(spck)
             self._send_ip_pcks_in_this_encap_pck(spck)
 
@@ -462,9 +461,10 @@ class IP_Sender(threading.Thread):
 
             if pld is not None:
                 self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+                print('sent pld: ', pld)
                 for i in retrieved_fragments:
-                    # remove from dictionary packets sent correctly
-                    del self.dict[i]
+                    # remove from dictionary fragments sent correctly
+                    del self.splitIP_head[i]
 
         else:
             # it means that the packet with sequence number = SN-1 was lost
@@ -475,11 +475,12 @@ class IP_Sender(threading.Thread):
         sn = spck.sn
         index = spck.index
         pld = spck.payload
-        self.offset = index
+        self.offset = index -1
         ip_len = 0
 
         while self.offset <= SCION_PAYLOAD_LENGTH:
             ip_header = pld[self.offset + ip_len:self.offset + ip_len + 20]
+            print('ip_header: ', ip_header)
             if len(ip_header) != 20:
                 self.splitIP_head[sn] = (True, ip_header)
                 # packet processed, time to remove it from dictionary
@@ -489,9 +490,11 @@ class IP_Sender(threading.Thread):
             else:
                 iph = unpack('!BBHHHBBH4s4s', ip_header)
                 ip_len = iph[2]
+                print('ip_length :', ip_len)
                 ip_pck = pld[self.offset:self.offset + ip_len]
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
                     self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
+                    print('sent pld: ', ip_pck)
                     self.offset = self.offset + ip_len
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
@@ -571,13 +574,15 @@ class Send_Delayed_Packets(threading.Thread):
     '''
     Class that decapsulate SCION packets into IP ones and send the IP packet to the right host inside the sdame AS
     '''
-    def __init__(self, name, spcks_dict, lost_or_delayed, splitIP_tail, splitIP_head, run_event):
+    def __init__(self, name, spcks_dict, lost_or_delayed, delayed_spcks, splitIP_tail, splitIP_head, ipsock, run_event):
         threading.Thread.__init__(self)
         self.name = name
         self.dict = spcks_dict
         self.lost_or_delayed = lost_or_delayed
+        self.delayed_spcks = delayed_spcks
         self.splitIP_tail = splitIP_tail
         self.splitIP_head = splitIP_head
+        self.ipsock = ipsock
         self.run_event = run_event
 
     def run(self):
@@ -590,13 +595,11 @@ class Send_Delayed_Packets(threading.Thread):
     def _run(self):
         print('Send_Delayed_Packets Started')
 
-        RICORDARSI DI COMTROLLARE SE SONO EMPTY ED AGGIORNARE SEMPRE self.lost_or_delayed ED self.delated_spcks ED self.dict
-
         while (self.run_event.is_set()):
             current_time = datetime.datetime.now()
 
-            if self.out_order_time:
-                sn, arrival_time = self.out_order_time.pop() # return and remove delayed pck with shortest time to live
+            if self.lost_or_delayed:
+                sn, arrival_time = self.lost_or_delayed.pop() # return and remove delayed pck with shortest time to live
                 if (current_time - arrival_time).total_seconds() > HALF_RTT:
                     # packet is too much in late, discard preceding fragments and it (N.B. pop() already done)
                     self._discard_preceding_fragments(sn)
@@ -605,24 +608,35 @@ class Send_Delayed_Packets(threading.Thread):
                     if sn in self.dict:
                         #notice that if the pck was lost, self.dict[sn] is empty
                         del self.dict[sn]
+                    if sn in self.delayed_spcks:
+                        # notice that if the pck was lost, self.delayed_spcks[sn] is (False, None)
+                        del self.delayed_spcks[sn]
+
                 else:
                     # try to send this pck and related fragments
+
+                    success_with_preceding = False
+                    success_with_following = False
                     if sn in self.dict:
                         #notice that if the pck was lost, self.dict[sn] is empty
-                        success_with_preceding = self.send_preceding_fragments(sn)
-                        success_with_following = self.send_following_fragments(sn)
+                        success_with_preceding = self._send_preceding_fragments(sn)
+                        success_with_following = self._send_following_fragments(sn)
 
                     if success_with_preceding and success_with_following == False:
                         # not all fragments sent, but still time to try so reinsert tuple in previous position
-                        self.out_order_time.append((sn, arrival_time))
+                        self.lost_or_delayed.append((sn, arrival_time))
+                    else:
+                        # all fragments sent properly
+
+                        if sn in self.dict:
+                            # notice that if the pck was lost, self.dict[sn] is empty
+                            del self.dict[sn]
+                        if sn in self.delayed_spcks:
+                            # notice that if the pck was lost, self.delayed_spcks[sn] is (False, None)
+                            del self.delayed_spcks[sn]
 
         print('***** Send_Delayed_Packets sender exited *****')
         sys.exit(1)
-
-    ''' also this thread has to have _send_previous_fragmented_ip_pck() and _send_current_ip_pcks() methods.
-    There will be a loop that will check inside the array out_of_order_time, will check that the time expired
-    is not more than 1/2 RTT and will first try to _send_previous_fragmented_ip_pck() using the content of
-    splitIP_head array and then try to _send_current_ip_pcks() using the content of splitIP_tail array.'''
 
 
     def _discard_preceding_fragments(self, sn):
@@ -680,9 +694,8 @@ class Send_Delayed_Packets(threading.Thread):
                     del self.splitIP_head[i]
 
 
-    def _send_previous_fragmented_ip_pck(self, spck):
-        CANCELLARE QUESTO ********************
-        sn = spck.sn
+    def _send_preceding_fragments(self, sn):
+        spck = self.dict[sn]
         index = spck.index
 
         if self.splitIP_head.get((sn - 1) % 4294967296) is not None:
@@ -723,9 +736,8 @@ class Send_Delayed_Packets(threading.Thread):
             self.splitIP_tail[sn] = spck.payload[:index]
 
 
-    def _send_ip_pcks_in_this_encap_pck(self, spck):
-        CANCELLA QUESTO POI **********************
-        sn = spck.sn
+    def _send_following_fragments(self, sn):
+        spck = self.dict[sn]
         index = spck.index
         pld = spck.payload
         self.offset = index
@@ -827,6 +839,12 @@ class ScionSIG(SCIONElement):
         # times when packets out of order are received
         self.lost_or_delayed = []
 
+        # this dictionary allows to check fast if a spck received is a delayed one or not.
+        # a loop through all the dictionary in the other threads will never be done thanks to
+        # the presence of the list self.out_of_order_time
+        self.delayed_spcks = {} # element is tuple (if_delated, time_reception_following_pck)
+
+
         # set up ReliableSocket to Dispatcher
         ### ADD SVC VALUE FOR THE SIG SERVICE; ADD THE SIG (IP & PORT) IN THE TOPOLOGY FILE !!!
         print('sig addr:', sig_addr)
@@ -871,12 +889,17 @@ class ScionSIG(SCIONElement):
         # or an intermediary fragment if index=0
         self.splitIP_head = {}
 
+
+        # create socket for IP_Sender and Send_Delayed_Packets
+        ICMP_CODE = socket.getprotobyname('icmp')
+        ipsock = socket.socket(socket.AF_INET, socket.SOCK_RAW, ICMP_CODE)
+
         # create IP_Sender
-        ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.splitIP_tail, self.splitIP_head, run_event)
+        ip_sender = IP_Sender("IP_Sender-Thread", self.spcks_dict, self.splitIP_tail, self.splitIP_head, ipsock, run_event)
         ip_sender.start()
 
         # create Flush_TimeArray thread
-        delayed_pcks = Send_Delayed_Packets("Send_Delayed_Packets-Thread", self.spcks_dict, self.lost_or_delayed, self.splitIP_tail, self.splitIP_head, run_event)
+        delayed_pcks = Send_Delayed_Packets("Send_Delayed_Packets-Thread", self.spcks_dict, self.lost_or_delayed, self.delayed_spcks, self.splitIP_tail, self.splitIP_head, ipsock, run_event)
         delayed_pcks.start()
 
         # loop for SCION Receiver
@@ -884,13 +907,6 @@ class ScionSIG(SCIONElement):
 
 
     def _SCION_Receiver(self, event, sock):
-
-        # this dictionary allows to check fast if a spck received is a delayed one or not.
-        # a loop through all the dictionary in the other threads will never be done thanks to
-        # the presence of the list self.out_of_order_time
-        self.delated_spcks = {}
-        for i in range (0, 4294967295):
-            self.delated_spcks[i] = (False, None) # tuple (if_delated, time_reception_following_pck)
 
         self.sn_expected = 0
         try:
@@ -954,19 +970,19 @@ class ScionSIG(SCIONElement):
         if sn != self.sn_expected:
             current_time = datetime.datetime.now()
 
-            if (sn in self.delated_spcks) and ((self.delated_spcks[sn][1]-current_time).total_seconds() <= HALF_RTT):
+            if (sn in self.delayed_spcks) and ((self.delayed_spcks[sn][1]-current_time).total_seconds() <= HALF_RTT):
                 # delayed packet arrived in time. Store it
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
                 print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
                 print('************************************')
 
-            elif not(sn in self.delated_spcks):
+            elif not(sn in self.delayed_spcks):
                 # the packets lost/delayed can be more than 1
                 while(self.sn_expected <= sn):
                     print('packet with sn= %s was lost' % self.sn_expected)
                     self.lost_or_delayed.insert(0,(self.sn_expected, current_time))  # insert on the left ---> TO BE REMOVED USING pop()
-                    self.delated_spcks[self.sn_expected] = (True, current_time)
+                    self.delayed_spcks[self.sn_expected] = (True, current_time)
 
                     self.sn_expected = (self.sn_expected + 1)% 4294967296
 

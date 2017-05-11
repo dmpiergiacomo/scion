@@ -317,7 +317,7 @@ class SCION_Sender(threading.Thread):
             pld.append(self.buf.popleft())
         encap_pck = pack(format, self.sn, self.index, self.unused, pld)
         print('************************************')
-        print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, 'encap_pck'))
+        print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
 
         # calcolate the index field
         if self.no_encap_counter > 0:
