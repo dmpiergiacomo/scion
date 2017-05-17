@@ -26,6 +26,7 @@ from collections import deque
 import datetime
 
 import pcapy
+import scapy.all as scapy
 
 # SCION
 from endhost.sciond import SCIOND_API_SOCKDIR, SCIONDaemon
@@ -318,6 +319,7 @@ class SCION_Sender(threading.Thread):
         pld = bytearray()
         for i in range(0, SCION_PAYLOAD_LENGTH):
             pld.append(self.buf.popleft())
+        self.index = self.offset + 1
         encap_pck = pack(format, self.sn, self.index, self.unused, pld)
         print('************************************')
         print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
@@ -326,7 +328,7 @@ class SCION_Sender(threading.Thread):
         if self.no_encap_counter > 0:
             print('no_encap_counter:', self.no_encap_counter)
             # no encapsulated packets start in this payload
-            self.index = 0
+            self.offset = -1
             self.no_encap_counter -= 1
         else:
             print('\nNext loop parameters:')
@@ -340,30 +342,30 @@ class SCION_Sender(threading.Thread):
         previous_offset = self.offset
 
         while self.offset < SCION_PAYLOAD_LENGTH:
-            print('self.offset: ', self.offset)
+            # print('self.offset: ', self.offset)
             ip_header = payload[self.offset:self.offset + 20]
             if len(ip_header) != 20:
-                print('extract missing header')
+                # print('extract missing header')
                 tmp = bytearray()
                 for i in range(0, (20 - len(ip_header))):
                     tmp.append(self.buf.popleft())
                 ip_header = ip_header + tmp
-                print('tmp: ', tmp)
+                # print('tmp: ', tmp)
                 for i in tmp:
                     self.buf.append(i)
 
-            print('ip_header: ', ip_header)
+            # print('ip_header: ', ip_header)
             iph = unpack('!BBHHHBBH4s4s', ip_header)
             ip_length = iph[2]
-            print('ip_length: ', ip_length)
+            # print('ip_length: ', ip_length)
             self.offset = self.offset + ip_length
-            print('self.offset: ', self.offset)
+            # print('self.offset: ', self.offset)
 
 
         self.no_encap_counter = int((self.offset - (SCION_PAYLOAD_LENGTH - previous_offset))/ SCION_PAYLOAD_LENGTH)
         #self.offset = (self.offset - (SCION_PAYLOAD_LENGTH - previous_offset)) % SCION_PAYLOAD_LENGTH
         self.offset = self.offset % SCION_PAYLOAD_LENGTH
-        print('self.offset: ', self.offset)
+        # print('self.offset: ', self.offset)
 
 
 
@@ -415,6 +417,8 @@ class IP_Sender(threading.Thread):
         spck = self.dict[sn]
         index = spck.index
         payload = spck.payload
+        # print('*******************************************************')
+        # print('index is: ', index)
 
         # no IP packets starts in this payload
         if index == 0:
@@ -423,7 +427,7 @@ class IP_Sender(threading.Thread):
             # packet processed, time to remove it from dictionary
             del self.dict[sn]
         else:
-            print('try to send pck')
+            # print('try to send pck')
             self._send_previous_fragmented_ip_pck(spck)
             self._send_ip_pcks_in_this_encap_pck(spck)
 
@@ -431,11 +435,12 @@ class IP_Sender(threading.Thread):
     def _send_previous_fragmented_ip_pck(self, spck):
         sn = spck.sn
         index = spck.index
+        # print('_send_previous_fragmented_ip_pck')
 
         if self.splitIP_head.get((sn-1)%4294967296) is not None:
             if index == 1:
                 # if the previous IP pck had index=0 it has not been sent yet and it has to be sent
-                pld = None
+                pld = b''
             else:
                 # when index>1 part of the previous IP pck is in the current encap pck
                 pld = spck.payload[:index]
@@ -460,8 +465,9 @@ class IP_Sender(threading.Thread):
                 iterator = (iterator - 1) % 4294967296
 
             if pld is not None:
-                self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
-                print('sent pld: ', pld)
+                ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
+                scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP)
+                # print('sent pld: ', pld)
                 for i in retrieved_fragments:
                     # remove from dictionary fragments sent correctly
                     del self.splitIP_head[i]
@@ -475,13 +481,17 @@ class IP_Sender(threading.Thread):
         sn = spck.sn
         index = spck.index
         pld = spck.payload
+        # print('_send_ip_pcks_in_this_encap_pck')
+
+        # print('pld is:', pld)
+
         self.offset = index -1
-        ip_len = 0
 
         while self.offset <= SCION_PAYLOAD_LENGTH:
-            ip_header = pld[self.offset + ip_len:self.offset + ip_len + 20]
-            print('ip_header: ', ip_header)
+            ip_header = pld[self.offset:self.offset + 20]
+            # print('ip_header: ', ip_header)
             if len(ip_header) != 20:
+                # print('header too short')
                 self.splitIP_head[sn] = (True, ip_header)
                 # packet processed, time to remove it from dictionary
                 del self.dict[sn]
@@ -490,12 +500,14 @@ class IP_Sender(threading.Thread):
             else:
                 iph = unpack('!BBHHHBBH4s4s', ip_header)
                 ip_len = iph[2]
-                print('ip_length :', ip_len)
+                # print('ip_length :', ip_len)
                 ip_pck = pld[self.offset:self.offset + ip_len]
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
-                    self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
-                    print('sent pld: ', ip_pck)
+                    ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
+                    scapy.sendp(ethernet/scapy.Raw(ip_pck), iface=ETH_LEGACY_IP)
+                    # print('sent pld: ', ip_pck)
                     self.offset = self.offset + ip_len
+                    # print('self.offset: ', self.offset)
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
                     # packet processed, time to remove it from dictionary
@@ -973,9 +985,9 @@ class ScionSIG(SCIONElement):
             if (sn in self.delayed_spcks) and ((self.delayed_spcks[sn][1]-current_time).total_seconds() <= HALF_RTT):
                 # delayed packet arrived in time. Store it
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-                print('added SCION pck with sn: %s and index: %s' % (sn, index))
+                # print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
-                print('************************************')
+                # print('************************************')
 
             elif not(sn in self.delayed_spcks):
                 # the packets lost/delayed can be more than 1
@@ -987,15 +999,15 @@ class ScionSIG(SCIONElement):
                     self.sn_expected = (self.sn_expected + 1)% 4294967296
 
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-                print('added SCION pck with sn: %s and index: %s' % (sn, index))
+                # print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
-                print('************************************')
+                # print('************************************')
 
         else:
             self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-            print('added SCION pck with sn: %s and index: %s' % (sn, index))
+            # print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
-            print('************************************')
+            # print('************************************')
 
 
     '''def _packet_put_old(self, packet):
