@@ -153,30 +153,32 @@ class IP_Receiver(threading.Thread):
             # take first 20 characters for the ip header
             ip_header = packet[eth_length:20 + eth_length]
 
-            # now unpack them :)
-            iph = unpack('!BBHHHBBH4s4s', ip_header)
+            if len(ip_header) == 20:
 
-            version_ihl = iph[0]
-            version = version_ihl >> 4
-            ihl = version_ihl & 0xF
+                # now unpack them :)
+                iph = unpack('!BBHHHBBH4s4s', ip_header)
 
-            iph_length = ihl * 4
+                version_ihl = iph[0]
+                version = version_ihl >> 4
+                ihl = version_ihl & 0xF
 
-            ttl = iph[5]
-            protocol = iph[6]
-            s_addr = socket.inet_ntoa(iph[8]);
-            d_addr = socket.inet_ntoa(iph[9]);
+                iph_length = ihl * 4
 
-            # analyze only incoming packets
-            if self._eth_addr(packet[0:6]) == LEGACY_MAC:
-                '''print('Destination MAC : ', self._eth_addr(packet[0:6]), ' Source MAC : ',
-                      self._eth_addr(packet[6:12]),
-                      ' Protocol : ', str(eth_protocol))
-                print('Version : ', str(version), ' IP Header Length : ', str(ihl), ' TTL : ', str(ttl),
-                      ' Protocol : ', str(protocol), ' Source Address : ', str(s_addr), ' Destination Address : ',
-                      str(d_addr))'''
+                ttl = iph[5]
+                protocol = iph[6]
+                s_addr = socket.inet_ntoa(iph[8]);
+                d_addr = socket.inet_ntoa(iph[9]);
 
-                return (packet[eth_length:], str(d_addr))
+                # analyze only incoming packets
+                if self._eth_addr(packet[0:6]) == LEGACY_MAC:
+                    '''print('Destination MAC : ', self._eth_addr(packet[0:6]), ' Source MAC : ',
+                          self._eth_addr(packet[6:12]),
+                          ' Protocol : ', str(eth_protocol))
+                    print('Version : ', str(version), ' IP Header Length : ', str(ihl), ' TTL : ', str(ttl),
+                          ' Protocol : ', str(protocol), ' Source Address : ', str(s_addr), ' Destination Address : ',
+                          str(d_addr))'''
+
+                    return (packet[eth_length:], str(d_addr))
 
 
         # Parse ARP packets, ARP Protocol number = 1544 (0x0806)
@@ -321,17 +323,17 @@ class SCION_Sender(threading.Thread):
             pld.append(self.buf.popleft())
         self.index = self.offset + 1
         encap_pck = pack(format, self.sn, self.index, self.unused, pld)
-        print('************************************')
-        print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
+        # print('************************************')
+        # print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
 
         # calcolate the index field
         if self.no_encap_counter > 0:
-            print('no_encap_counter:', self.no_encap_counter)
+            # print('no_encap_counter:', self.no_encap_counter)
             # no encapsulated packets start in this payload
             self.offset = -1
             self.no_encap_counter -= 1
         else:
-            print('\nNext loop parameters:')
+            # print('\nNext loop parameters:')
             self._offset_next_encap_pck(pld)
             self.index = self.offset
 
@@ -351,8 +353,8 @@ class SCION_Sender(threading.Thread):
                     tmp.append(self.buf.popleft())
                 ip_header = ip_header + tmp
                 # print('tmp: ', tmp)
-                for i in tmp:
-                    self.buf.append(i)
+                for i in range (len(tmp)):
+                    self.buf.appendleft(tmp[len(tmp)-1-i])
 
             # print('ip_header: ', ip_header)
             iph = unpack('!BBHHHBBH4s4s', ip_header)
@@ -425,7 +427,8 @@ class IP_Sender(threading.Thread):
             self.splitIP_head[sn] = (False, payload)  # tuple: (IP_pck_starts_in_this_elem, part_of_payload_of_fragmented_pck)
 
             # packet processed, time to remove it from dictionary
-            del self.dict[sn]
+            if self.dic[sn]:
+                del self.dict[sn]
         else:
             # print('try to send pck')
             self._send_previous_fragmented_ip_pck(spck)
@@ -436,6 +439,7 @@ class IP_Sender(threading.Thread):
         sn = spck.sn
         index = spck.index
         # print('_send_previous_fragmented_ip_pck')
+        print('IP ender _send_previous_fragmented_ip_pck sn: ', sn)
 
         if self.splitIP_head.get((sn-1)%4294967296) is not None:
             if index == 1:
@@ -470,7 +474,8 @@ class IP_Sender(threading.Thread):
                 # print('sent pld: ', pld)
                 for i in retrieved_fragments:
                     # remove from dictionary fragments sent correctly
-                    del self.splitIP_head[i]
+                    if i in self.splitIP_head:
+                        del self.splitIP_head[i]
 
         else:
             # it means that the packet with sequence number = SN-1 was lost
@@ -494,7 +499,8 @@ class IP_Sender(threading.Thread):
                 # print('header too short')
                 self.splitIP_head[sn] = (True, ip_header)
                 # packet processed, time to remove it from dictionary
-                del self.dict[sn]
+                if sn in self.dict:
+                    del self.dict[sn]
                 break
 
             else:
@@ -511,7 +517,8 @@ class IP_Sender(threading.Thread):
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
                     # packet processed, time to remove it from dictionary
-                    del self.dict[sn]
+                    if sn in self.dict:
+                        del self.dict[sn]
                     break
 
 
@@ -619,7 +626,8 @@ class Send_Delayed_Packets(threading.Thread):
 
                     if sn in self.dict:
                         #notice that if the pck was lost, self.dict[sn] is empty
-                        del self.dict[sn]
+                        if sn in self.dict:
+                            del self.dict[sn]
                     if sn in self.delayed_spcks:
                         # notice that if the pck was lost, self.delayed_spcks[sn] is (False, None)
                         del self.delayed_spcks[sn]
@@ -707,6 +715,7 @@ class Send_Delayed_Packets(threading.Thread):
 
 
     def _send_preceding_fragments(self, sn):
+        # print('_send_preceding_fragments for sn: ', sn)
         spck = self.dict[sn]
         index = spck.index
 
@@ -741,7 +750,7 @@ class Send_Delayed_Packets(threading.Thread):
                 self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
                 for i in retrieved_fragments:
                     # remove from dictionary packets sent correctly
-                    del self.dict[i]
+                    del self.splitIP_head[i]
 
         else:
             # it means that the packet with sequence number = SN-1 was lost
@@ -760,7 +769,8 @@ class Send_Delayed_Packets(threading.Thread):
             if len(ip_header) != 20:
                 self.splitIP_head[sn] = (True, ip_header)
                 # packet processed, time to remove it from dictionary
-                del self.dict[sn]
+                if sn in self.dict:
+                    del self.dict[sn]
                 break
 
             else:
@@ -773,7 +783,8 @@ class Send_Delayed_Packets(threading.Thread):
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
                     # packet processed, time to remove it from dictionary
-                    del self.dict[sn]
+                    if sn in self.dict:
+                        del self.dict[sn]
                     break
 
 
@@ -923,8 +934,8 @@ class ScionSIG(SCIONElement):
         self.sn_expected = 0
         try:
             while 1:
+                print('expected sn: ', self.sn_expected)
                 self._encap_recv(sock)
-                self.sn_expected = (self.sn_expected + 1) % 4294967296
 
         # kill all threads if needed
         except KeyboardInterrupt:
@@ -985,13 +996,13 @@ class ScionSIG(SCIONElement):
             if (sn in self.delayed_spcks) and ((self.delayed_spcks[sn][1]-current_time).total_seconds() <= HALF_RTT):
                 # delayed packet arrived in time. Store it
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-                # print('added SCION pck with sn: %s and index: %s' % (sn, index))
+                print('CASE1; added SCION pck with sn: %s and index: %s' % (sn, index))
 
-                # print('************************************')
+                print('************************************')
 
             elif not(sn in self.delayed_spcks):
                 # the packets lost/delayed can be more than 1
-                while(self.sn_expected <= sn):
+                while(self.sn_expected < sn):
                     print('packet with sn= %s was lost' % self.sn_expected)
                     self.lost_or_delayed.insert(0,(self.sn_expected, current_time))  # insert on the left ---> TO BE REMOVED USING pop()
                     self.delayed_spcks[self.sn_expected] = (True, current_time)
@@ -999,15 +1010,19 @@ class ScionSIG(SCIONElement):
                     self.sn_expected = (self.sn_expected + 1)% 4294967296
 
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-                # print('added SCION pck with sn: %s and index: %s' % (sn, index))
+                print('CASE2; added SCION pck with sn: %s and index: %s' % (sn, index))
 
-                # print('************************************')
+                print('************************************')
+
+                self.sn_expected = (self.sn_expected + 1) % 4294967296
 
         else:
             self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-            # print('added SCION pck with sn: %s and index: %s' % (sn, index))
+            print('CASE3; added SCION pck with sn: %s and index: %s' % (sn, index))
 
-            # print('************************************')
+            print('************************************')
+
+            self.sn_expected = (self.sn_expected + 1) % 4294967296
 
 
     '''def _packet_put_old(self, packet):
