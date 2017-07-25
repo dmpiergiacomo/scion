@@ -119,9 +119,14 @@ class IP_Receiver(threading.Thread):
             if all(parsed):
                 # get destination AS by SIG's list
                 # THIS SELECTION MUST BE BETTER DESIGNED (PROBABLY USING THE PySubnetTree)
-                if dest_ip == '169.254.1.2':
+                '''if dest_ip == '169.254.1.2':
+                    dest_isd = 1
+                    dest_as = 11'''
+                if dest_ip == '169.254.4.2':
+                    #print('destination is 169.254.4.2')
                     dest_isd = 1
                     dest_as = 11
+
                 if dest_ip == '169.254.2.2':
                     dest_isd = 1
                     dest_as = 12
@@ -418,6 +423,7 @@ class IP_Sender(threading.Thread):
     def _send_procedure(self, sn):
         spck = self.dict[sn]
         index = spck.index
+        # print('index received: ', index)
         payload = spck.payload
         # print('*******************************************************')
         # print('index is: ', index)
@@ -427,7 +433,7 @@ class IP_Sender(threading.Thread):
             self.splitIP_head[sn] = (False, payload)  # tuple: (IP_pck_starts_in_this_elem, part_of_payload_of_fragmented_pck)
 
             # packet processed, time to remove it from dictionary
-            if self.dic[sn]:
+            if self.dict[sn]:
                 del self.dict[sn]
         else:
             # print('try to send pck')
@@ -439,7 +445,7 @@ class IP_Sender(threading.Thread):
         sn = spck.sn
         index = spck.index
         # print('_send_previous_fragmented_ip_pck')
-        print('IP ender _send_previous_fragmented_ip_pck sn: ', sn)
+        #print('IP ender _send_previous_fragmented_ip_pck sn: ', sn)
 
         if self.splitIP_head.get((sn-1)%4294967296) is not None:
             if index == 1:
@@ -470,8 +476,33 @@ class IP_Sender(threading.Thread):
 
             if pld is not None:
                 ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
-                scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP)
-                # print('sent pld: ', pld)
+                print('pld length: ', len(pld))
+                if len(pld) > 1024:
+                    remaining = pld
+                    header = pld[:20]
+                    iph = unpack('!BBHHHBBH4s4s', header)
+                    new_iph = scapy.IP(version=iph[0], ihl=iph[1], len=1024, id=iph[3],
+                                       flags="MF", frag=0, ttl=iph[5], proto=iph[6], src="169.254.4.2",
+                                       dst="169.254.2.2")
+                    flags_fragOffset = iph[4]
+                    print('flags: ', flags_fragOffset)
+                    flag_MF_yes = 1
+                    flag_MF_no = 0
+                    flag_offset = 0
+                    flags_fragOffset = (flag_MF_yes << 13) | flag_offset
+                    print('flags: ', flags_fragOffset)
+                    frag = pld[20:1024]
+                    scapy.sendp(ethernet / new_iph / scapy.Raw(frag), iface=ETH_LEGACY_IP)
+                    print('first fragment sent!!!')
+                    while(len(remaining)>0):
+                        frag = remaining[:1024]
+                        frag = header + frag
+                        remaining = remaining[1024:]
+                        print('frag length: ', len(frag))
+                        scapy.sendp(ethernet / scapy.Raw(frag), iface=ETH_LEGACY_IP)
+                else:
+                    scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP)
+                # print('sent pld from _send_previous_fragmented_ip_pck')
                 for i in retrieved_fragments:
                     # remove from dictionary fragments sent correctly
                     if i in self.splitIP_head:
@@ -511,7 +542,7 @@ class IP_Sender(threading.Thread):
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
                     ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
                     scapy.sendp(ethernet/scapy.Raw(ip_pck), iface=ETH_LEGACY_IP)
-                    # print('sent pld: ', ip_pck)
+                    # print('sent pld from _send_ip_pcks_in_this_encap_pck')
                     self.offset = self.offset + ip_len
                     # print('self.offset: ', self.offset)
                 else:
@@ -534,7 +565,9 @@ class IP_Sender(threading.Thread):
             payload = self.remaining + payload
             ip_len = len(self.remaining) + index
             ip_pld = payload[0:ip_len]
-            self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+            #self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+            ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
+            scapy.sendp(ethernet / scapy.Raw(ip_pld), iface=ETH_LEGACY_IP)
 
         #send payload of sn
         if index != 0:
@@ -545,12 +578,14 @@ class IP_Sender(threading.Thread):
                     self.last_processed_spck = sn
                     break
 
-                print('ip_header: ', ip_header)
+                # print('ip_header: ', ip_header)
                 iph = unpack('!BBHHHBBH4s4s', ip_header)
                 ip_len = iph[2]
                 ip_pld = payload[self.offset:self.offset + ip_len]
                 if self.offset+ip_len < SCION_PAYLOAD_LENGTH:
-                    self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+                    #self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+                    ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pld), iface=ETH_LEGACY_IP)
                     self.offset = self.offset + ip_len
                 else:
                     self.remaining = ip_header + ip_pld
@@ -747,7 +782,9 @@ class Send_Delayed_Packets(threading.Thread):
                 iterator = (iterator - 1) % 4294967296
 
             if pld is not None:
-                self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+                #self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+                ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
+                scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP)
                 for i in retrieved_fragments:
                     # remove from dictionary packets sent correctly
                     del self.splitIP_head[i]
@@ -778,7 +815,9 @@ class Send_Delayed_Packets(threading.Thread):
                 ip_len = iph[2]
                 ip_pck = pld[self.offset:self.offset + ip_len]
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
-                    self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
+                    #self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
+                    ethernet = scapy.Ether(src='08:00:27:7d:70:04', dst='08:00:27:be:4c:8e', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pck), iface=ETH_LEGACY_IP)
                     self.offset = self.offset + ip_len
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
@@ -937,6 +976,7 @@ class ScionSIG(SCIONElement):
                 print('expected sn: ', self.sn_expected)
                 self._encap_recv(sock)
 
+
         # kill all threads if needed
         except KeyboardInterrupt:
             print('Attempting to close threads')
@@ -996,9 +1036,9 @@ class ScionSIG(SCIONElement):
             if (sn in self.delayed_spcks) and ((self.delayed_spcks[sn][1]-current_time).total_seconds() <= HALF_RTT):
                 # delayed packet arrived in time. Store it
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-                print('CASE1; added SCION pck with sn: %s and index: %s' % (sn, index))
+                #print('CASE1; added SCION pck with sn: %s and index: %s' % (sn, index))
 
-                print('************************************')
+                #print('************************************')
 
             elif not(sn in self.delayed_spcks):
                 # the packets lost/delayed can be more than 1
@@ -1010,17 +1050,17 @@ class ScionSIG(SCIONElement):
                     self.sn_expected = (self.sn_expected + 1)% 4294967296
 
                 self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-                print('CASE2; added SCION pck with sn: %s and index: %s' % (sn, index))
+                #print('CASE2; added SCION pck with sn: %s and index: %s' % (sn, index))
 
-                print('************************************')
+                #print('************************************')
 
                 self.sn_expected = (self.sn_expected + 1) % 4294967296
 
         else:
             self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
-            print('CASE3; added SCION pck with sn: %s and index: %s' % (sn, index))
+            #print('CASE3; added SCION pck with sn: %s and index: %s' % (sn, index))
 
-            print('************************************')
+            #print('************************************')
 
             self.sn_expected = (self.sn_expected + 1) % 4294967296
 

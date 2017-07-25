@@ -94,8 +94,8 @@ class IP_Receiver(threading.Thread):
                     #   promiscious mode (1 for true)
                     #   timeout (in milliseconds)
                 '''
-        self.cap = pcapy.open_live(ETH_LEGACY_IP, 65536, 1, 0)
 
+        self.cap = pcapy.open_live(ETH_LEGACY_IP, 65536, 1, 0)
 
     def run(self):
         try:
@@ -129,6 +129,21 @@ class IP_Receiver(threading.Thread):
                     dest_isd = 1
                     dest_as = 11
 
+                if dest_ip == '169.254.4.2':
+                    print('Destination is 169.254.4.2')
+                    # send trough direct Internet link
+                    ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pck), iface='enp0s10')
+                    continue
+
+                '''if dest_ip == '169.254.1.2':
+                    print('Destination is 169.254.1.2')
+                    # send trough direct Internet link
+                    ethernet = scapy.Ether(src='08:00:27:08:9c:bd', dst='08:00:27:59:3d:4a', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pck), iface='enp0s8')
+                    continue'''
+
+
                 dest_ia = ISD_AS().from_values(dest_isd, dest_as)
 
                 # add IP pck to stream
@@ -140,6 +155,7 @@ class IP_Receiver(threading.Thread):
 
 
     def _parse_packet(self, packet):
+        print('packet length: ', len(packet))
         # parse ethernet header
         eth_length = 14
 
@@ -171,6 +187,149 @@ class IP_Receiver(threading.Thread):
 
                 # analyze only incoming packets
                 if self._eth_addr(packet[0:6]) == LEGACY_MAC:
+                    '''print('Destination MAC : ', self._eth_addr(packet[0:6]), ' Source MAC : ',
+                          self._eth_addr(packet[6:12]),
+                          ' Protocol : ', str(eth_protocol))
+                    print('Version : ', str(version), ' IP Header Length : ', str(ihl), ' TTL : ', str(ttl),
+                          ' Protocol : ', str(protocol), ' Source Address : ', str(s_addr), ' Destination Address : ',
+                          str(d_addr))'''
+
+                    return (packet[eth_length:], str(d_addr))
+
+
+        # Parse ARP packets, ARP Protocol number = 1544 (0x0806)
+        elif eth_protocol == 1544:
+            # discard ARP packet
+            print('### ARP packet ###')
+            return (None, None)
+
+        return (None, None)
+
+
+    def _eth_addr(self, a):
+        # convert a string of 6 characters of ethernet address into a dash separated hex string
+        b = "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x" % (a[0], a[1], a[2], a[3], a[4], a[5])
+        return b
+
+
+    def _add_to_stream(self, ip_pck):
+        for i in ip_pck:
+            self.buf.append(i)
+        # print('buffer after add: ', self.buf)
+
+
+
+class Second_IP_Receiver(threading.Thread):
+    '''
+    Class that stores incoming IP packets into IP buffer
+    '''
+    def __init__(self, name, buf, run_event):
+        threading.Thread.__init__(self)
+        self.name = name
+        self.buf = buf
+        self.run_event = run_event
+
+        '''
+                    open device
+                    # Arguments here are:
+                    #   device
+                    #   snaplen (maximum number of bytes to capture _per_packet_)
+                    #   promiscious mode (1 for true)
+                    #   timeout (in milliseconds)
+                '''
+
+        self.cap = pcapy.open_live('enp0s10', 65536, 1, 0)
+
+    def run(self):
+        try:
+            self._run()
+        finally:
+            logging.info("IP Receiver NOT started !!!")
+
+
+    def _run(self):
+        print('Second IP Receiver Started')
+
+        # receive incoming IP packets and store thm in the IP buffer
+        while (self.run_event.is_set()):
+            # return an ip packet
+            (header, packet) = self.cap.next()
+
+            parsed = (ip_pck, dest_ip) = self._parse_packet(packet)
+
+            # iterate only if IP pck
+            if all(parsed):
+                # get destination AS by SIG's list
+                # THIS SELECTION MUST BE BETTER DESIGNED (PROBABLY USING THE PySubnetTree)
+                if dest_ip == '169.254.1.2':
+                    dest_isd = 1
+                    dest_as = 11
+                if dest_ip == '169.254.2.2':
+                    dest_isd = 1
+                    dest_as = 12
+
+                if dest_ip == '169.254.1.1':
+                    dest_isd = 1
+                    dest_as = 11
+
+                '''if dest_ip == '169.254.4.2':
+                    print('Destination is 169.254.4.2')
+                    # send trough direct Internet link
+                    ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pck), iface='enp0s10')
+                    continue'''
+
+                if dest_ip == '169.254.1.2':
+                    print('Destination is 169.254.1.2')
+                    # send trough direct Internet link
+                    ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pck), iface='enp0s9')
+                    continue
+
+
+                dest_ia = ISD_AS().from_values(dest_isd, dest_as)
+
+                # add IP pck to stream
+                self._add_to_stream(ip_pck)
+
+
+        print('***** IP receiver exited *****')
+        sys.exit(1)
+
+
+    def _parse_packet(self, packet):
+        print('packet length: ', len(packet))
+        # parse ethernet header
+        eth_length = 14
+
+        eth_header = packet[:eth_length]
+        eth = unpack('!6s6sH', eth_header)
+        eth_protocol = socket.ntohs(eth[2])
+
+        # Parse IP packets, IP Protocol number = 8 (0x0800)
+        if eth_protocol == 8:
+            # Parse IP header
+            # take first 20 characters for the ip header
+            ip_header = packet[eth_length:20 + eth_length]
+
+            if len(ip_header) == 20:
+
+                # now unpack them :)
+                iph = unpack('!BBHHHBBH4s4s', ip_header)
+
+                version_ihl = iph[0]
+                version = version_ihl >> 4
+                ihl = version_ihl & 0xF
+
+                iph_length = ihl * 4
+
+                ttl = iph[5]
+                protocol = iph[6]
+                s_addr = socket.inet_ntoa(iph[8]);
+                d_addr = socket.inet_ntoa(iph[9]);
+
+                # analyze only incoming packets
+                if self._eth_addr(packet[0:6]) == '08:00:27:59:3d:4a':
                     '''print('Destination MAC : ', self._eth_addr(packet[0:6]), ' Source MAC : ',
                           self._eth_addr(packet[6:12]),
                           ' Protocol : ', str(eth_protocol))
@@ -348,7 +507,7 @@ class SCION_Sender(threading.Thread):
         self.index = self.offset + 1
         encap_pck = pack(format, self.sn, self.index, self.unused, pld)
         # print('************************************')
-        print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
+        #print('sn: %s\nindex: %s\nencap_pck: %s' % (self.sn, self.index, encap_pck))
 
         # calcolate the index field
         if self.no_encap_counter > 0:
@@ -492,15 +651,18 @@ class IP_Sender(threading.Thread):
                 iterator = (iterator - 1) % 4294967296
 
             if pld is not None:
-                ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:0b:3c:de', type=0x0800)
-                scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP)
+                #print('pld is: ', pld)
+                # ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800) (send to a2)
+                ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                # scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP) (send to a2)
+                scapy.sendp(ethernet / scapy.Raw(pld), iface='enp0s10')
                 # print('sent pld: ', pld)
                 for i in retrieved_fragments:
                     # remove from dictionary fragments sent correctly
                     del self.splitIP_head[i]
 
         else:
-            # it means that the packet with sequence number = SN-1 was lost
+            # it means that the packet with sequence number = SN-1 was already sent or lost/in late
             self.splitIP_tail[sn] = spck.payload[:index]
 
 
@@ -521,7 +683,8 @@ class IP_Sender(threading.Thread):
                 # print('header too short')
                 self.splitIP_head[sn] = (True, ip_header)
                 # packet processed, time to remove it from dictionary
-                del self.dict[sn]
+                if sn in self.dict:
+                    del self.dict[sn]
                 break
 
             else:
@@ -529,16 +692,20 @@ class IP_Sender(threading.Thread):
                 ip_len = iph[2]
                 # print('ip_length :', ip_len)
                 ip_pck = pld[self.offset:self.offset + ip_len]
+                #print('pld is: ', ip_pck)
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
-                    ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:0b:3c:de', type=0x0800)
-                    scapy.sendp(ethernet/scapy.Raw(ip_pck), iface=ETH_LEGACY_IP)
+                    # ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800) (send to a2)
+                    ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                    # scapy.sendp(ethernet/scapy.Raw(pld), iface=ETH_LEGACY_IP) (send to a2)
+                    scapy.sendp(ethernet/scapy.Raw(ip_pck), iface='enp0s10')
                     # print('sent pld: ', ip_pck)
                     self.offset = self.offset + ip_len
                     # print('self.offset: ', self.offset)
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
                     # packet processed, time to remove it from dictionary
-                    del self.dict[sn]
+                    if sn in self.dict:
+                        del self.dict[sn]
                     break
 
 
@@ -554,7 +721,10 @@ class IP_Sender(threading.Thread):
             payload = self.remaining + payload
             ip_len = len(self.remaining) + index
             ip_pld = payload[0:ip_len]
-            self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+            #self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+            ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+            scapy.sendp(ethernet / scapy.Raw(ip_pld), iface='enp0s10')
+            print('sent within _send_ip_pcks_old')
 
         #send payload of sn
         if index != 0:
@@ -570,7 +740,10 @@ class IP_Sender(threading.Thread):
                 ip_len = iph[2]
                 ip_pld = payload[self.offset:self.offset + ip_len]
                 if self.offset+ip_len < SCION_PAYLOAD_LENGTH:
-                    self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+                    #self.ipsock.sendto(ip_pld, (LEGACY_HOST_SAME_AS, 1))
+                    ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pld), iface='enp0s10')
+                    print('sent within _send_ip_pcks_old')
                     self.offset = self.offset + ip_len
                 else:
                     self.remaining = ip_header + ip_pld
@@ -765,7 +938,11 @@ class Send_Delayed_Packets(threading.Thread):
                 iterator = (iterator - 1) % 4294967296
 
             if pld is not None:
-                self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+                #self.ipsock.sendto(pld, (LEGACY_HOST_SAME_AS, 1))
+                #self.ipsock.sendto(pld, ('169.254.4.2', 1))
+                ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                scapy.sendp(ethernet / scapy.Raw(pld), iface='enp0s10')
+                print('sent within _send_preceding_fragments')
                 for i in retrieved_fragments:
                     # remove from dictionary packets sent correctly
                     del self.dict[i]
@@ -783,7 +960,7 @@ class Send_Delayed_Packets(threading.Thread):
         ip_len = 0
 
         while self.offset <= SCION_PAYLOAD_LENGTH:
-            ip_header = pld[self.offset + ip_len:self.offset + ip_len + 20]
+            ip_header = pld[self.offset + ip_len:self.offset + ip_len + 20] # MAYBE I SHOULD REMOVE '+ ip_len'
             if len(ip_header) != 20:
                 self.splitIP_head[sn] = (True, ip_header)
                 # packet processed, time to remove it from dictionary
@@ -795,7 +972,11 @@ class Send_Delayed_Packets(threading.Thread):
                 ip_len = iph[2]
                 ip_pck = pld[self.offset:self.offset + ip_len]
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
-                    self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
+                    #self.ipsock.sendto(ip_pck, (LEGACY_HOST_SAME_AS, 1))
+                    #self.ipsock.sendto(ip_pck, ('169.254.4.2', 1))
+                    ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                    scapy.sendp(ethernet / scapy.Raw(ip_pck), iface='enp0s10')
+                    print('sent within _send_following_fragments')
                     self.offset = self.offset + ip_len
                 else:
                     self.splitIP_head[sn] = (True, ip_pck)
@@ -897,8 +1078,12 @@ class ScionSIG(SCIONElement):
         run_event.set()
 
 
+
         # create an Ip_Receiver that processes all the incoming IP packets
-        ip_receiver = IP_Receiver("IP_Receiver-Thread", ip_buf, run_event)
+        #ip_receiver = IP_Receiver("IP_Receiver-Thread", ip_buf, run_event)
+        #ip_receiver.start()
+
+        ip_receiver = Second_IP_Receiver("Second_IP_Receiver-Thread", ip_buf, run_event)
         ip_receiver.start()
 
 
@@ -950,7 +1135,7 @@ class ScionSIG(SCIONElement):
         try:
             while 1:
                 self._encap_recv(sock)
-                self.sn_expected = (self.sn_expected + 1) % 4294967296
+                #self.sn_expected = (self.sn_expected + 1) % 4294967296
 
         # kill all threads if needed
         except KeyboardInterrupt:
@@ -1003,6 +1188,7 @@ class ScionSIG(SCIONElement):
         spck = packet.pack()
         #print('SCION pld received: ', spck)
         sn, index, unused, payload = self._unpack_scion_pck(spck)
+        #print('SCION pld: ', payload)
 
         # if packets lost
         if sn != self.sn_expected:
@@ -1029,11 +1215,15 @@ class ScionSIG(SCIONElement):
 
                 # print('************************************')
 
+                self.sn_expected = (self.sn_expected + 1) % 4294967296
+
         else:
             self.spcks_dict[sn] = Decapsulated_Packet(sn, index, unused, payload)
             # print('added SCION pck with sn: %s and index: %s' % (sn, index))
 
             # print('************************************')
+
+            self.sn_expected = (self.sn_expected + 1) % 4294967296
 
 
     def _unpack_scion_pck(self, spck):
