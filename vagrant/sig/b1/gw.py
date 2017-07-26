@@ -119,9 +119,9 @@ class IP_Receiver(threading.Thread):
             if all(parsed):
                 # get destination AS by SIG's list
                 # THIS SELECTION MUST BE BETTER DESIGNED (PROBABLY USING THE PySubnetTree)
-                '''if dest_ip == '169.254.1.2':
+                if dest_ip == '169.254.1.2':
                     dest_isd = 1
-                    dest_as = 11'''
+                    dest_as = 11
                 if dest_ip == '169.254.4.2':
                     #print('destination is 169.254.4.2')
                     dest_isd = 1

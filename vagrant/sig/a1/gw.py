@@ -652,10 +652,10 @@ class IP_Sender(threading.Thread):
 
             if pld is not None:
                 #print('pld is: ', pld)
-                # ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800) (send to a2)
-                ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
-                # scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP) (send to a2)
-                scapy.sendp(ethernet / scapy.Raw(pld), iface='enp0s10')
+                ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800)
+                #ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                scapy.sendp(ethernet / scapy.Raw(pld), iface=ETH_LEGACY_IP)
+                #scapy.sendp(ethernet / scapy.Raw(pld), iface='enp0s10')
                 # print('sent pld: ', pld)
                 for i in retrieved_fragments:
                     # remove from dictionary fragments sent correctly
@@ -694,10 +694,10 @@ class IP_Sender(threading.Thread):
                 ip_pck = pld[self.offset:self.offset + ip_len]
                 #print('pld is: ', ip_pck)
                 if self.offset + ip_len <= SCION_PAYLOAD_LENGTH:
-                    # ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800) (send to a2)
-                    ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
-                    # scapy.sendp(ethernet/scapy.Raw(pld), iface=ETH_LEGACY_IP) (send to a2)
-                    scapy.sendp(ethernet/scapy.Raw(ip_pck), iface='enp0s10')
+                    ethernet = scapy.Ether(src='08:00:27:e2:f7:59', dst='08:00:27:94:f9:9c', type=0x0800)
+                    #ethernet = scapy.Ether(src='08:00:27:59:3d:4a', dst='08:00:27:08:9c:bd', type=0x0800)
+                    scapy.sendp(ethernet/scapy.Raw(pld), iface=ETH_LEGACY_IP)
+                    #scapy.sendp(ethernet/scapy.Raw(ip_pck), iface='enp0s10')
                     # print('sent pld: ', ip_pck)
                     self.offset = self.offset + ip_len
                     # print('self.offset: ', self.offset)
@@ -1080,11 +1080,11 @@ class ScionSIG(SCIONElement):
 
 
         # create an Ip_Receiver that processes all the incoming IP packets
-        #ip_receiver = IP_Receiver("IP_Receiver-Thread", ip_buf, run_event)
-        #ip_receiver.start()
-
-        ip_receiver = Second_IP_Receiver("Second_IP_Receiver-Thread", ip_buf, run_event)
+        ip_receiver = IP_Receiver("IP_Receiver-Thread", ip_buf, run_event)
         ip_receiver.start()
+
+        #ip_receiver = Second_IP_Receiver("Second_IP_Receiver-Thread", ip_buf, run_event)
+        #ip_receiver.start()
 
 
         # only destination for now is SIG at 1-12
